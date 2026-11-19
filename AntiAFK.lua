@@ -34,6 +34,13 @@ env.__AntiAFK_Loaded = true
 
 local startTime = os.clock()
 local kickBlocked = 0
+local reconnectStatus = "ON"
+
+-- ตั้งค่า Auto Reconnect
+local SCRIPT_URL = "https://raw.githubusercontent.com/nottoio555/AntiAFK/main/AntiAFK.lua"
+local AUTO_RECONNECT = true
+local RECONNECT_DELAY = 3   -- วินาทีก่อนเริ่ม rejoin
+local MAX_RETRIES = 5       -- จำนวนครั้งสูงสุดที่ลองต่อเนื่อง
 
 -- ตัวช่วยแสดงสถานะบนหน้าจอ
 local function getGuiParent()
@@ -57,7 +64,7 @@ end)
 gui.Parent = getGuiParent()
 
 local label = Instance.new("TextLabel")
-label.Size = UDim2.fromOffset(210, 44)
+label.Size = UDim2.fromOffset(230, 62)
 label.Position = UDim2.new(0, 10, 0, 10)
 label.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
 label.BackgroundTransparency = 0.25
@@ -80,9 +87,10 @@ end
 
 local function refresh()
     label.Text = string.format(
-        "Anti AFK: ON\nเวลาทำงาน %s | กันแล้ว %d ครั้ง",
+        "Anti AFK: ON\nเวลาทำงาน %s | กันแล้ว %d ครั้ง\nAuto Reconnect: %s",
         fmt(os.clock() - startTime),
-        kickBlocked
+        kickBlocked,
+        reconnectStatus
     )
 end
 refresh()
@@ -110,5 +118,90 @@ env.__AntiAFK_Conn = LocalPlayer.Idled:Connect(function()
     print(string.format("[Anti AFK] ส่ง input ปลอมครั้งที่ %d", kickBlocked))
 end)
 
+-- ===== Auto Reconnect =====
+if AUTO_RECONNECT then
+    local TeleportService = game:GetService("TeleportService")
+    local GuiService = game:GetService("GuiService")
+    local placeId, jobId = game.PlaceId, game.JobId
+    local rejoining = false
+    local retries = 0
+
+    -- ให้สคริปต์รันต่ออัตโนมัติหลังเข้าเซิร์ฟเวอร์ใหม่
+    local queue = queue_on_teleport
+        or (syn and syn.queue_on_teleport)
+        or (fluxus and fluxus.queue_on_teleport)
+    if queue then
+        pcall(queue, string.format("loadstring(game:HttpGet(%q))()", SCRIPT_URL))
+    end
+
+    local function setStatus(text)
+        reconnectStatus = text
+        refresh()
+    end
+
+    local function rejoin(reason)
+        if rejoining then return end
+        rejoining = true
+        print("[Anti AFK] หลุดจากเซิร์ฟเวอร์: " .. tostring(reason))
+
+        task.spawn(function()
+            while retries < MAX_RETRIES do
+                retries += 1
+                setStatus(string.format("กำลังเชื่อมต่อใหม่ (%d/%d)", retries, MAX_RETRIES))
+                task.wait(RECONNECT_DELAY * retries)
+
+                -- ครั้งแรกพยายามกลับเซิร์ฟเวอร์เดิม ครั้งถัดไปเข้าเซิร์ฟเวอร์ใดก็ได้
+                local ok, err = pcall(function()
+                    if retries == 1 and jobId ~= "" then
+                        TeleportService:TeleportToPlaceInstance(placeId, jobId, LocalPlayer)
+                    else
+                        TeleportService:Teleport(placeId, LocalPlayer)
+                    end
+                end)
+                if not ok then
+                    warn("[Anti AFK] Rejoin ล้มเหลว: " .. tostring(err))
+                end
+                task.wait(10) -- ถ้ายังอยู่ที่นี่ แปลว่า teleport ยังไม่สำเร็จ
+            end
+            setStatus("ล้มเหลว (ครบจำนวนครั้ง)")
+            notify("เชื่อมต่อใหม่ไม่สำเร็จ")
+            rejoining = false
+        end)
+    end
+
+    -- ถ้า teleport ล้มเหลว ให้ลองใหม่
+    TeleportService.TeleportInitFailed:Connect(function(_, result, msg)
+        warn("[Anti AFK] TeleportInitFailed: " .. tostring(result) .. " " .. tostring(msg))
+    end)
+
+    -- ตรวจจับหน้าต่าง error ของ Roblox (เน็ตหลุด, ถูกตัดการเชื่อมต่อ)
+    local function watchPrompt()
+        local ok, overlay = pcall(function()
+            return game:GetService("CoreGui")
+                :WaitForChild("RobloxPromptGui", 30)
+                :WaitForChild("promptOverlay", 30)
+        end)
+        if ok and overlay then
+            overlay.ChildAdded:Connect(function(child)
+                if child.Name == "ErrorPrompt" then
+                    rejoin("ErrorPrompt")
+                end
+            end)
+        end
+    end
+    task.spawn(watchPrompt)
+
+    -- ตัวสำรอง ใช้กรณีเข้าถึง CoreGui ไม่ได้
+    pcall(function()
+        GuiService.ErrorMessageChanged:Connect(function()
+            local msg = GuiService:GetErrorMessage()
+            if msg and msg ~= "" then
+                rejoin(msg)
+            end
+        end)
+    end)
+
+    notify("Auto Reconnect เปิดอยู่")
+end
 notify("เปิดใช้งานแล้ว")
 print("[Anti AFK] เปิดใช้งานแล้ว")
