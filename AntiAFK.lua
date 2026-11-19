@@ -553,54 +553,98 @@ if WEBHOOK_ENABLED then
             return (txt:gsub("<[^>]->", ""):gsub("^%s+", ""):gsub("%s+$", ""))
         end
 
-        local function themeOf(txt)
-            return txt:match("^%-%s*(.-)%s*%-$") or txt:match("^–%s*(.-)%s*–$")
+        -- ตัดสัญลักษณ์ตกแต่ง (✨ • ● - ฯลฯ) ออก เหลือแต่ข้อความ
+        local SYMBOLS = { "✨", "•", "●", "◆", "◇", "★", "☆", "⭐", "✦", "❖", "–", "—" }
+        local function core(txt)
+            for _, s in ipairs(SYMBOLS) do
+                txt = txt:gsub(s, "")
+            end
+            return (txt:gsub("^[%p%s]+", ""):gsub("[%p%s]+$", ""))
         end
 
-        -- หา popup การ์ด: บรรทัด "• RARITY •" และ "- THEME -" ใต้ชื่อการ์ด
+        local function isDecorated(txt)
+            local c = core(txt)
+            if c == "" or c == txt then return false end
+            local function alnum(b) return (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) end
+            return not alnum(txt:byte(1)) and not alnum(txt:byte(-1))
+        end
+
+        -- หา popup การ์ด: 3 บรรทัดที่มีสัญลักษณ์ตกแต่ง เรียงบนลงล่าง = ชื่อ, Rarity, Theme
         local function scanCard()
+            local deco = {}
             for _, l in ipairs(PlayerGui:GetDescendants()) do
                 if l:IsA("TextLabel") and shown(l) then
-                    local rarity = clean(l.Text):match("^•%s*(.-)%s*•$")
-                    if rarity and rarity ~= "" then
-                        local rarY = l.AbsolutePosition.Y
-                        local node = l.Parent
-                        for _ = 1, 5 do
-                            if not node or node == PlayerGui then break end
-                            local theme, name, nameY
-                            for _, d in ipairs(node:GetDescendants()) do
-                                if d:IsA("TextLabel") and d ~= l and shown(d) then
-                                    local tx = clean(d.Text)
-                                    local y = d.AbsolutePosition.Y
-                                    local th = themeOf(tx)
-                                    if th and th ~= "" and y > rarY then
-                                        theme = th
-                                    elseif tx ~= "" and y < rarY and (not nameY or y > nameY) then
-                                        name, nameY = tx, y
-                                    end
-                                end
-                            end
-                            if theme and name then
-                                name = clean(name:gsub("✨", ""))
-                                return name, rarity, theme
-                            end
-                            node = node.Parent
-                        end
+                    local tx = clean(l.Text)
+                    if tx ~= "" and isDecorated(tx) then
+                        deco[#deco + 1] = { label = l, text = tx, y = l.AbsolutePosition.Y }
                     end
                 end
             end
+            for _, item in ipairs(deco) do
+                local node = item.label.Parent
+                for _ = 1, 5 do
+                    if not node or node == PlayerGui then break end
+                    local group = {}
+                    for _, o in ipairs(deco) do
+                        if o.label:IsDescendantOf(node) then group[#group + 1] = o end
+                    end
+                    if #group == 3 then
+                        table.sort(group, function(x, y) return x.y < y.y end)
+                        return core(group[1].text), core(group[2].text), core(group[3].text)
+                    elseif #group > 3 then
+                        break
+                    end
+                    node = node.Parent
+                end
+            end
+        end
+
+        -- โหมด debug: getgenv().AntiAFK_Debug = true จะรายงานข้อความใหม่ที่ปรากฏบนจอ
+        local seen = {}
+        local debugBuf = {}
+        local debugReady = false
+        local function debugScan()
+            for _, l in ipairs(PlayerGui:GetDescendants()) do
+                if l:IsA("TextLabel") then
+                    local tx = clean(l.Text)
+                    if shown(l) and tx ~= "" then
+                        if seen[l] ~= tx then
+                            if debugReady then
+                                debugBuf[#debugBuf + 1] = string.format("[%s] %q", l:GetFullName():sub(-60), tx)
+                            end
+                            seen[l] = tx
+                        end
+                    else
+                        seen[l] = nil
+                    end
+                end
+            end
+            debugReady = true
         end
 
         local RARITY_COLOR = 0xEB459E
         local lastKey, missing = nil, 0
 
         task.spawn(function()
-            send({
+            local okFirst = send({
                 title = "Anti AFK เชื่อมต่อ Webhook แล้ว",
                 description = "ผู้เล่น: " .. LocalPlayer.Name,
                 color = 0x57F287,
             })
+            webhookStatus = okFirst and "พร้อม (ส่งทดสอบแล้ว)" or "ส่งทดสอบไม่สำเร็จ"
+            local lastFlush = os.clock()
             while gui.Parent do
+                if env.AntiAFK_Debug then
+                    pcall(debugScan)
+                    if #debugBuf > 0 and os.clock() - lastFlush > 3 then
+                        local text = table.concat(debugBuf, "\n")
+                        debugBuf = {}
+                        lastFlush = os.clock()
+                        print("[Anti AFK Debug]\n" .. text)
+                        send({ title = "Debug: ข้อความใหม่บนจอ", description = "```\n" .. text:sub(1, 3500) .. "\n```", color = 0xFEE75C })
+                    end
+                end
+
                 local ok, name, rarity, theme = pcall(scanCard)
                 if ok and name then
                     missing = 0
@@ -621,6 +665,8 @@ if WEBHOOK_ENABLED then
                         webhookStatus = sent and ("ส่งแล้ว: " .. name) or "ส่งไม่สำเร็จ"
                         print("[Anti AFK] การ์ด: " .. key)
                     end
+                elseif not ok then
+                    warn("[Anti AFK] scanCard error: " .. tostring(name))
                 else
                     missing += 1
                     if missing >= 4 then lastKey = nil end -- popup หายไปแล้ว รอการ์ดใบถัดไป
@@ -628,7 +674,6 @@ if WEBHOOK_ENABLED then
                 task.wait(0.5)
             end
         end)
-    end
 end
 notify("เปิดใช้งานแล้ว")
 print("[Anti AFK] เปิดใช้งานแล้ว")
