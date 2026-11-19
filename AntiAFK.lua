@@ -8,6 +8,11 @@ local VirtualUser = game:GetService("VirtualUser")
 local StarterGui = game:GetService("StarterGui")
 local RunService = game:GetService("RunService")
 
+-- รอให้เกมโหลดเสร็จก่อน (สำคัญตอนรันอัตโนมัติหลัง rejoin)
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
 local LocalPlayer = Players.LocalPlayer
 while not LocalPlayer do
     task.wait()
@@ -34,7 +39,8 @@ env.__AntiAFK_Loaded = true
 
 local startTime = os.clock()
 local kickBlocked = 0
-local reconnectStatus = "ON"
+local reconnectStatus = "เปิดอยู่ · พร้อมเชื่อมต่อใหม่"
+local loadingStatus = "กำลังตรวจหน้าโหลด..."
 local eventStatus = "กำลังเริ่ม"
 local rebirthStatus = "กำลังอ่านค่า..."
 local webhookStatus = "กำลังเริ่ม"
@@ -50,8 +56,12 @@ local REBIRTH_COST_OVERRIDE = nil   -- ใส่ตัวเลขเองไ�
 
 -- ตั้งค่า Event Lottery อัตโนมัติ (ทุกชั่วโมง นาทีที่ 00)
 local EVENT_ENABLED = true
-local EVENT_NUMBERS = { "1", "4" }  -- เลขที่จะกดตามลำดับ
+local EVENT_FIXED_NUMBER = nil      -- nil = สุ่มเลข 00-99 ใหม่ทุกชั่วโมง, หรือใส่เลขเอง เช่น 14
 local EVENT_WINDOW_MIN = 5          -- หา popup ในช่วง 5 นาทีแรกของชั่วโมง
+
+-- ตั้งค่าข้ามหน้าโหลด (หน้าที่ต้องคลิก 1 ครั้งเพื่อเข้าเกม)
+local AUTO_SKIP_LOADING = true
+local LOADING_WATCH_SEC = 120       -- เฝ้าหน้าโหลดกี่วินาทีหลังเข้าเซิร์ฟเวอร์
 
 -- ตั้งค่า Auto Reconnect
 local SCRIPT_URL = "https://raw.githubusercontent.com/nottoio555/AntiAFK/main/AntiAFK.lua"
@@ -70,48 +80,192 @@ local function getGuiParent()
     return LocalPlayer:WaitForChild("PlayerGui")
 end
 
+local UserInputService = game:GetService("UserInputService")
+
 local gui = Instance.new("ScreenGui")
 gui.Name = "AntiAFKStatus"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 gui.DisplayOrder = 999
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 pcall(function()
     if syn and syn.protect_gui then syn.protect_gui(gui) end
 end)
 gui.Parent = getGuiParent()
 
-local label = Instance.new("TextLabel")
-label.Size = UDim2.fromOffset(280, 116)
-label.Position = UDim2.new(0, 10, 0, 10)
-label.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-label.BackgroundTransparency = 0.25
-label.TextColor3 = Color3.fromRGB(80, 255, 120)
-label.Font = Enum.Font.GothamBold
-label.TextSize = 13
-label.TextXAlignment = Enum.TextXAlignment.Left
-label.Text = ""
-label.Parent = gui
+local THEME = {
+    bg = Color3.fromRGB(16, 16, 24),
+    card = Color3.fromRGB(28, 28, 40),
+    accent = Color3.fromRGB(150, 100, 255),
+    accent2 = Color3.fromRGB(255, 90, 170),
+    text = Color3.fromRGB(240, 240, 250),
+    sub = Color3.fromRGB(160, 160, 185),
+    ok = Color3.fromRGB(70, 225, 125),
+    warn = Color3.fromRGB(255, 195, 70),
+    bad = Color3.fromRGB(255, 85, 95),
+}
 
-local pad = Instance.new("UIPadding")
-pad.PaddingLeft = UDim.new(0, 8)
-pad.Parent = label
-Instance.new("UICorner", label).CornerRadius = UDim.new(0, 6)
+local function make(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props) do o[k] = v end
+    o.Parent = parent
+    return o
+end
+
+local function corner(o, r)
+    make("UICorner", { CornerRadius = UDim.new(0, r) }, o)
+end
+
+-- กล่องหลัก
+local main = make("Frame", {
+    Name = "Main",
+    Size = UDim2.fromOffset(300, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    Position = UDim2.fromOffset(12, 12),
+    BackgroundColor3 = THEME.bg,
+    BackgroundTransparency = 0.05,
+    BorderSizePixel = 0,
+}, gui)
+corner(main, 12)
+local stroke = make("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5, Transparency = 0.2 }, main)
+make("UIGradient", {
+    Color = ColorSequence.new(THEME.accent, THEME.accent2),
+    Rotation = 45,
+}, stroke)
+make("UIPadding", {
+    PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10),
+    PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10),
+}, main)
+make("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, main)
+
+-- ส่วนหัว (ลากย้ายได้)
+local header = make("Frame", {
+    Size = UDim2.new(1, 0, 0, 32), BackgroundTransparency = 1, LayoutOrder = 0, Active = true,
+}, main)
+local dot = make("Frame", {
+    Size = UDim2.fromOffset(10, 10), Position = UDim2.new(0, 2, 0, 4),
+    BackgroundColor3 = THEME.ok, BorderSizePixel = 0,
+}, header)
+corner(dot, 5)
+make("TextLabel", {
+    Text = "ANTI AFK", Font = Enum.Font.GothamBlack, TextSize = 16, TextColor3 = THEME.text,
+    BackgroundTransparency = 1, Position = UDim2.fromOffset(20, 0), Size = UDim2.new(1, -60, 0, 18),
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, header)
+local uptimeLabel = make("TextLabel", {
+    Text = "", Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = THEME.sub,
+    BackgroundTransparency = 1, Position = UDim2.fromOffset(20, 18), Size = UDim2.new(1, -60, 0, 14),
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, header)
+local minBtn = make("TextButton", {
+    Text = "–", Font = Enum.Font.GothamBold, TextSize = 16, TextColor3 = THEME.text,
+    Size = UDim2.fromOffset(28, 28), Position = UDim2.new(1, -28, 0, 2),
+    BackgroundColor3 = THEME.card, BorderSizePixel = 0, AutoButtonColor = true,
+}, header)
+corner(minBtn, 8)
+
+-- รายการสถานะ
+local body = make("Frame", {
+    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1, LayoutOrder = 1,
+}, main)
+make("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, body)
+
+local rows = {}
+local function addRow(key, icon, title, order)
+    local card = make("Frame", {
+        Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = THEME.card,
+        BorderSizePixel = 0, LayoutOrder = order,
+    }, body)
+    corner(card, 8)
+    local bar = make("Frame", {
+        Size = UDim2.new(0, 3, 1, -16), Position = UDim2.new(0, 6, 0, 8),
+        BackgroundColor3 = THEME.ok, BorderSizePixel = 0,
+    }, card)
+    corner(bar, 2)
+    make("TextLabel", {
+        Text = icon, Font = Enum.Font.GothamBold, TextSize = 18, TextColor3 = THEME.text,
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(14, 0), Size = UDim2.new(0, 26, 1, 0),
+    }, card)
+    make("TextLabel", {
+        Text = title, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = THEME.text,
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(46, 6), Size = UDim2.new(1, -52, 0, 14),
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, card)
+    local value = make("TextLabel", {
+        Text = "-", Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = THEME.sub,
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(46, 22), Size = UDim2.new(1, -52, 0, 14),
+        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+    }, card)
+    rows[key] = { bar = bar, value = value }
+end
+
+addRow("afk", "🛡️", "Anti AFK", 1)
+addRow("loading", "🚪", "ข้ามหน้าโหลด", 2)
+addRow("reconnect", "🔄", "Auto Reconnect", 3)
+addRow("event", "🎰", "Lottery Event", 4)
+addRow("rebirth", "⭐", "Rebirth", 5)
+addRow("webhook", "📨", "Discord Webhook", 6)
+
+-- ย่อ/ขยาย
+local collapsed = false
+minBtn.MouseButton1Click:Connect(function()
+    collapsed = not collapsed
+    body.Visible = not collapsed
+    minBtn.Text = collapsed and "+" or "–"
+end)
+
+-- ลากย้ายตำแหน่ง
+do
+    local dragging, dragStart, startPos
+    header.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging, dragStart, startPos = true, input.Position, main.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local d = input.Position - dragStart
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
+                startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+end
 
 local function fmt(sec)
     sec = math.floor(sec)
     return string.format("%02d:%02d:%02d", sec // 3600, (sec % 3600) // 60, sec % 60)
 end
 
+-- สีตามสถานะ: แดง = มีปัญหา, เหลือง = กำลังรอ/ทำงาน, เขียว = ปกติ
+local function toneOf(s)
+    if s == "ปิดอยู่" or s == "ไม่พบหน้าโหลด" then return THEME.sub end
+    if s:find("ไม่") or s:find("ล้มเหลว") or s:find("error") then return THEME.bad end
+    if s:find("รอบหน้า") then return THEME.ok end
+    if s:find("รอ") or s:find("กำลัง") or s:find("เปิดหน้า") then return THEME.warn end
+    return THEME.ok
+end
+
+local function setRow(key, text)
+    local r = rows[key]
+    if not r then return end
+    r.value.Text = text
+    r.bar.BackgroundColor3 = toneOf(text)
+end
+
 local function refresh()
-    label.Text = string.format(
-        "Anti AFK: ON\nเวลาทำงาน %s | กันแล้ว %d ครั้ง\nAuto Reconnect: %s\nEvent: %s\nRebirth: %s\nWebhook: %s",
-        fmt(os.clock() - startTime),
-        kickBlocked,
-        reconnectStatus,
-        eventStatus,
-        rebirthStatus,
-        webhookStatus
-    )
+    uptimeLabel.Text = "ทำงานมาแล้ว " .. fmt(os.clock() - startTime)
+    setRow("afk", string.format("เปิดอยู่ · กันแล้ว %d ครั้ง", kickBlocked))
+    setRow("loading", loadingStatus)
+    setRow("reconnect", reconnectStatus)
+    setRow("event", eventStatus)
+    setRow("rebirth", rebirthStatus)
+    setRow("webhook", webhookStatus)
 end
 refresh()
 
@@ -137,6 +291,120 @@ env.__AntiAFK_Conn = LocalPlayer.Idled:Connect(function()
     refresh()
     print(string.format("[Anti AFK] ส่ง input ปลอมครั้งที่ %d", kickBlocked))
 end)
+
+-- ===== ข้ามหน้าโหลด =====
+-- บางเกมมีหน้าโหลดเต็มจอที่ต้องคลิก 1 ครั้งก่อนเข้าเกม ส่วนนี้จะคลิกให้อัตโนมัติ
+if AUTO_SKIP_LOADING then
+    task.spawn(function()
+        local VIM = game:GetService("VirtualInputManager")
+        local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+        local Camera = workspace.CurrentCamera
+        local CUES = { "CLICK", "TAP", "PRESS", "ENTER", "START", "CONTINUE", "PLAY", "คลิก", "แตะ", "เริ่ม", "เข้าเกม" }
+
+        local function shown(inst)
+            local cur = inst
+            while cur and cur ~= PlayerGui do
+                if cur:IsA("GuiObject") and not cur.Visible then return false end
+                if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+                cur = cur.Parent
+            end
+            return cur == PlayerGui
+        end
+
+        -- หาสิ่งที่บังเต็มจอ และปุ่ม/ข้อความที่บอกให้คลิก ภายในหน้านั้น
+        local function findLoading()
+            local vp = Camera.ViewportSize
+            for _, sg in ipairs(PlayerGui:GetChildren()) do
+                if sg:IsA("ScreenGui") and sg.Enabled then
+                    local cover
+                    for _, d in ipairs(sg:GetDescendants()) do
+                        if d:IsA("GuiObject") and d.AbsoluteSize.X >= vp.X * 0.9
+                            and d.AbsoluteSize.Y >= vp.Y * 0.9 and shown(d) then
+                            local opaque = d.BackgroundTransparency < 0.3
+                                or ((d:IsA("ImageLabel") or d:IsA("ImageButton"))
+                                    and d.Image ~= "" and d.ImageTransparency < 0.3)
+                            if opaque then cover = d break end
+                        end
+                    end
+                    if cover then
+                        local cue
+                        for _, d in ipairs(sg:GetDescendants()) do
+                            if (d:IsA("TextLabel") or d:IsA("TextButton")) and shown(d) and #d.Text <= 40 then
+                                local up = d.Text:upper()
+                                for _, c in ipairs(CUES) do
+                                    if up:find(c, 1, true) then cue = d break end
+                                end
+                                if cue then break end
+                            end
+                        end
+                        return cover, cue
+                    end
+                end
+            end
+        end
+
+        local function fireButton(inst)
+            local btn = inst
+            while btn and not btn:IsA("GuiButton") do
+                btn = btn.Parent
+                if btn == PlayerGui then return false end
+            end
+            if not (btn and getconnections) then return false end
+            local fired = false
+            for _, sig in ipairs({ btn.MouseButton1Click, btn.Activated, btn.MouseButton1Down }) do
+                local ok, conns = pcall(getconnections, sig)
+                if ok and conns then
+                    for _, c in ipairs(conns) do
+                        if pcall(function() c:Fire() end) then fired = true end
+                    end
+                end
+            end
+            return fired
+        end
+
+        local function clickAt(obj)
+            local p, s = obj.AbsolutePosition, obj.AbsoluteSize
+            local x, y = p.X + s.X / 2, p.Y + s.Y / 2
+            pcall(function()
+                VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                task.wait(0.05)
+                VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+            end)
+        end
+
+        local deadline = os.clock() + LOADING_WATCH_SEC
+        local clicks = 0
+        while os.clock() < deadline and gui.Parent do
+            local ok, cover, cue = pcall(findLoading)
+            if ok and cover then
+                local target = cue or cover
+                if not fireButton(target) then
+                    clickAt(target)
+                end
+                clicks += 1
+                loadingStatus = string.format("กำลังกดเข้าเกม (%d)", clicks)
+                refresh()
+                task.wait(2)
+            else
+                if clicks > 0 then
+                    loadingStatus = "กดเข้าเกมแล้ว"
+                    print("[Anti AFK] ข้ามหน้าโหลดแล้ว")
+                    break
+                end
+                task.wait(1)
+            end
+        end
+        if clicks == 0 then
+            loadingStatus = "ไม่พบหน้าโหลด"
+        elseif loadingStatus ~= "กดเข้าเกมแล้ว" then
+            loadingStatus = "หน้าโหลดยังไม่หาย"
+            warn("[Anti AFK] คลิกหน้าโหลดแล้วแต่ยังไม่หาย")
+        end
+        refresh()
+    end)
+else
+    loadingStatus = "ปิดอยู่"
+end
 
 -- ===== Auto Reconnect =====
 if AUTO_RECONNECT then
@@ -230,6 +498,25 @@ if EVENT_ENABLED then
     local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
     local doneKey = nil
     local state = { key = nil, digitsDone = false, betTries = 0 }
+    local rng = Random.new()
+    local lastNumber = nil
+
+    -- เลขของชั่วโมงนี้: สุ่ม 00-99 ใหม่ทุกชั่วโมง (ไม่ซ้ำกับรอบก่อน)
+    local function pickNumber()
+        if EVENT_FIXED_NUMBER then
+            return math.clamp(math.floor(EVENT_FIXED_NUMBER), 0, 99)
+        end
+        local n
+        repeat
+            n = rng:NextInteger(0, 99)
+        until n ~= lastNumber
+        return n
+    end
+
+    local function digitsOf(n)
+        local s = string.format("%02d", n)
+        return { s:sub(1, 1), s:sub(2, 2) }
+    end
 
     local function isShown(inst)
         local cur = inst
@@ -311,8 +598,17 @@ if EVENT_ENABLED then
         end
 
         if not state.digitsDone then
-            for _, digit in ipairs(EVENT_NUMBERS) do
-                local d = findText(root, function(s) return s == digit end)
+            for _, digit in ipairs(digitsOf(state.number)) do
+                -- เลือกเฉพาะเลขที่อยู่บนปุ่ม เพื่อไม่ให้ไปโดนตัวเลขอื่นในหน้าจอ
+                local d
+                for _, o in ipairs(root:GetDescendants()) do
+                    local txt = textOf(o)
+                    if txt == digit and isShown(o) and clickableOf(o, root) then
+                        d = o
+                        break
+                    end
+                end
+                d = d or findText(root, function(s) return s == digit end)
                 if not d then
                     eventStatus = "ไม่พบปุ่มเลข " .. digit
                     return
@@ -334,9 +630,10 @@ if EVENT_ENABLED then
 
         if isLocked(root) then
             doneKey = key
-            eventStatus = "ทำ Event สำเร็จ"
-            print("[Anti AFK] ทำ Event Lottery สำเร็จ")
-            notify("ทำ Event สำเร็จ")
+            lastNumber = state.number
+            eventStatus = string.format("แทงเลข %02d สำเร็จ", state.number)
+            print(string.format("[Anti AFK] ทำ Event Lottery สำเร็จ เลข %02d", state.number))
+            notify(string.format("แทงเลข %02d สำเร็จ", state.number))
         elseif state.betTries >= 3 then
             doneKey = key
             eventStatus = "กด BET ไม่ติด (ข้ามรอบนี้)"
@@ -352,23 +649,29 @@ if EVENT_ENABLED then
                 local secs = (59 - t.min) * 60 + (60 - t.sec)
 
                 if state.key ~= key then
-                    state = { key = key, digitsDone = false, betTries = 0 }
+                    state = { key = key, digitsDone = false, betTries = 0, number = pickNumber() }
                 end
+                local num = string.format("%02d", state.number)
 
                 if doneKey == key then
                     if eventStatus:find("สำเร็จ") == nil and eventStatus:find("ข้าม") == nil then
                         eventStatus = "เสร็จแล้ว"
                     end
+                    if t.min >= EVENT_WINDOW_MIN then
+                        local last = lastNumber and string.format(" · ล่าสุด %02d", lastNumber) or ""
+                        eventStatus = "รอบหน้าใน " .. fmt(secs) .. last
+                    end
                 elseif t.min < EVENT_WINDOW_MIN then
                     local root = findPopup()
                     if root then
-                        eventStatus = "กำลังทำ Event..."
+                        eventStatus = "กำลังแทงเลข " .. num .. "..."
                         attempt(root, key)
                     else
-                        eventStatus = "รอ popup..."
+                        eventStatus = "เลข " .. num .. " · รอ popup..."
                     end
                 else
-                    eventStatus = "รอบหน้าใน " .. fmt(secs)
+                    local last = lastNumber and string.format(" · ล่าสุด %02d", lastNumber) or ""
+                    eventStatus = "รอบหน้าใน " .. fmt(secs) .. last
                 end
             end)
             if not ok then
