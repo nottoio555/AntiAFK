@@ -35,6 +35,12 @@ env.__AntiAFK_Loaded = true
 local startTime = os.clock()
 local kickBlocked = 0
 local reconnectStatus = "ON"
+local eventStatus = "กำลังเริ่ม"
+
+-- ตั้งค่า Event Lottery อัตโนมัติ (ทุกชั่วโมง นาทีที่ 00)
+local EVENT_ENABLED = true
+local EVENT_NUMBERS = { "1", "4" }  -- เลขที่จะกดตามลำดับ
+local EVENT_WINDOW_MIN = 5          -- หา popup ในช่วง 5 นาทีแรกของชั่วโมง
 
 -- ตั้งค่า Auto Reconnect
 local SCRIPT_URL = "https://raw.githubusercontent.com/nottoio555/AntiAFK/main/AntiAFK.lua"
@@ -64,7 +70,7 @@ end)
 gui.Parent = getGuiParent()
 
 local label = Instance.new("TextLabel")
-label.Size = UDim2.fromOffset(230, 62)
+label.Size = UDim2.fromOffset(250, 80)
 label.Position = UDim2.new(0, 10, 0, 10)
 label.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
 label.BackgroundTransparency = 0.25
@@ -87,10 +93,11 @@ end
 
 local function refresh()
     label.Text = string.format(
-        "Anti AFK: ON\nเวลาทำงาน %s | กันแล้ว %d ครั้ง\nAuto Reconnect: %s",
+        "Anti AFK: ON\nเวลาทำงาน %s | กันแล้ว %d ครั้ง\nAuto Reconnect: %s\nEvent: %s",
         fmt(os.clock() - startTime),
         kickBlocked,
-        reconnectStatus
+        reconnectStatus,
+        eventStatus
     )
 end
 refresh()
@@ -202,6 +209,162 @@ if AUTO_RECONNECT then
     end)
 
     notify("Auto Reconnect เปิดอยู่")
+end
+-- ===== Event Lottery อัตโนมัติ =====
+if EVENT_ENABLED then
+    local VIM = game:GetService("VirtualInputManager")
+    local GuiService = game:GetService("GuiService")
+    local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+    local doneKey = nil
+    local state = { key = nil, digitsDone = false, betTries = 0 }
+
+    local function isShown(inst)
+        local cur = inst
+        while cur and cur ~= PlayerGui do
+            if cur:IsA("GuiObject") and not cur.Visible then return false end
+            if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+            cur = cur.Parent
+        end
+        return cur == PlayerGui
+    end
+
+    local function textOf(inst)
+        if inst:IsA("TextLabel") or inst:IsA("TextButton") then
+            return (inst.Text:gsub("<[^>]->", ""):gsub("^%s+", ""):gsub("%s+$", ""))
+        end
+    end
+
+    local function findText(scope, matcher)
+        for _, d in ipairs(scope:GetDescendants()) do
+            local txt = textOf(d)
+            if txt and matcher(txt:upper()) and isShown(d) then
+                return d
+            end
+        end
+    end
+
+    local function findPopup()
+        local lbl = findText(PlayerGui, function(s) return s == "LOTTERY" end)
+        return lbl and lbl:FindFirstAncestorWhichIsA("ScreenGui")
+    end
+
+    local function clickableOf(inst, root)
+        local cur = inst
+        while cur and cur ~= root do
+            if cur:IsA("GuiButton") then return cur end
+            cur = cur.Parent
+        end
+    end
+
+    local function press(target, root)
+        -- วิธีที่ 1: ยิง connection ของปุ่มโดยตรง
+        local btn = clickableOf(target, root)
+        local fired = 0
+        if btn and getconnections then
+            for _, sig in ipairs({ btn.MouseButton1Click, btn.Activated }) do
+                local ok, conns = pcall(getconnections, sig)
+                if ok and conns then
+                    for _, c in ipairs(conns) do
+                        if pcall(function() c:Fire() end) then fired += 1 end
+                    end
+                end
+            end
+        end
+        if fired > 0 then return true end
+
+        -- วิธีที่ 2: คลิกเมาส์จำลองที่กึ่งกลางปุ่ม
+        local obj = btn or target
+        local pos, size = obj.AbsolutePosition, obj.AbsoluteSize
+        local x, y = pos.X + size.X / 2, pos.Y + size.Y / 2
+        local sg = obj:FindFirstAncestorWhichIsA("ScreenGui")
+        if sg and not sg.IgnoreGuiInset then
+            local inset = GuiService:GetGuiInset()
+            x, y = x + inset.X, y + inset.Y
+        end
+        VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+        task.wait(0.05)
+        VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+        return true
+    end
+
+    local function isLocked(root)
+        return findText(root, function(s) return s:find("LOCKED", 1, true) ~= nil end) ~= nil
+    end
+
+    local function attempt(root, key)
+        if isLocked(root) then
+            doneKey = key
+            return
+        end
+
+        if not state.digitsDone then
+            for _, digit in ipairs(EVENT_NUMBERS) do
+                local d = findText(root, function(s) return s == digit end)
+                if not d then
+                    eventStatus = "ไม่พบปุ่มเลข " .. digit
+                    return
+                end
+                press(d, root)
+                task.wait(0.4)
+            end
+            state.digitsDone = true
+        end
+
+        local bet = findText(root, function(s) return #s <= 8 and s:find("BET", 1, true) ~= nil end)
+        if not bet then
+            eventStatus = "ไม่พบปุ่ม BET"
+            return
+        end
+        press(bet, root)
+        state.betTries += 1
+        task.wait(1.5)
+
+        if isLocked(root) then
+            doneKey = key
+            eventStatus = "ทำ Event สำเร็จ"
+            print("[Anti AFK] ทำ Event Lottery สำเร็จ")
+            notify("ทำ Event สำเร็จ")
+        elseif state.betTries >= 3 then
+            doneKey = key
+            eventStatus = "กด BET ไม่ติด (ข้ามรอบนี้)"
+            warn("[Anti AFK] กด BET ไม่ติดหลังลอง 3 ครั้ง")
+        end
+    end
+
+    task.spawn(function()
+        while gui.Parent do
+            local ok, err = pcall(function()
+                local t = os.date("*t")
+                local key = string.format("%d-%d-%d", t.year, t.yday, t.hour)
+                local secs = (59 - t.min) * 60 + (60 - t.sec)
+
+                if state.key ~= key then
+                    state = { key = key, digitsDone = false, betTries = 0 }
+                end
+
+                if doneKey == key then
+                    if eventStatus:find("สำเร็จ") == nil and eventStatus:find("ข้าม") == nil then
+                        eventStatus = "เสร็จแล้ว"
+                    end
+                elseif t.min < EVENT_WINDOW_MIN then
+                    local root = findPopup()
+                    if root then
+                        eventStatus = "กำลังทำ Event..."
+                        attempt(root, key)
+                    else
+                        eventStatus = "รอ popup..."
+                    end
+                else
+                    eventStatus = "รอบหน้าใน " .. fmt(secs)
+                end
+            end)
+            if not ok then
+                warn("[Anti AFK] Event error: " .. tostring(err))
+            end
+            refresh()
+            task.wait(1)
+        end
+    end)
 end
 notify("เปิดใช้งานแล้ว")
 print("[Anti AFK] เปิดใช้งานแล้ว")
