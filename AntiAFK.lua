@@ -496,9 +496,11 @@ if REBIRTH_ENABLED then
         end
     end)
 end
+
 -- ===== Discord Webhook แจ้งเตือนการ์ดที่สุ่มได้ =====
 if WEBHOOK_ENABLED then
     local HttpService = game:GetService("HttpService")
+    local MarketplaceService = game:GetService("MarketplaceService")
     local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
     local url = env.AntiAFK_Webhook
@@ -524,14 +526,24 @@ if WEBHOOK_ENABLED then
     else
         webhookStatus = "พร้อม"
 
-        local function send(embed)
+        -- ---------- ส่งข้อความ (มีตัวจำกัดความถี่) ----------
+        local lastSend = 0
+        local function send(payload)
+            local wait = 1.2 - (os.clock() - lastSend)
+            if wait > 0 then task.wait(wait) end
+            lastSend = os.clock()
+            payload.username = payload.username or "Anti AFK"
             local ok, res = pcall(httpRequest, {
                 Url = url,
                 Method = "POST",
                 Headers = { ["Content-Type"] = "application/json" },
-                Body = HttpService:JSONEncode({ username = "Anti AFK", embeds = { embed } }),
+                Body = HttpService:JSONEncode(payload),
             })
             local code = ok and res and res.StatusCode
+            if code == 429 then
+                task.wait(5)
+                return false
+            end
             if not (code and code >= 200 and code < 300) then
                 warn("[Anti AFK] ส่ง Webhook ไม่สำเร็จ: " .. tostring(ok and code or res))
                 return false
@@ -539,6 +551,43 @@ if WEBHOOK_ENABLED then
             return true
         end
 
+        local function getJson(u)
+            local ok, res = pcall(httpRequest, { Url = u, Method = "GET" })
+            if ok and res and res.StatusCode == 200 then
+                local ok2, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+                if ok2 then return data end
+            end
+        end
+
+        -- รูปโปรไฟล์ผู้เล่น
+        local avatarUrl
+        task.spawn(function()
+            local data = getJson(string.format(
+                "https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=%d&size=150x150&format=Png",
+                LocalPlayer.UserId))
+            avatarUrl = data and data.data and data.data[1] and data.data[1].imageUrl
+        end)
+
+        -- รูปการ์ด (แปลง rbxassetid เป็นลิงก์รูปที่ Discord แสดงได้)
+        local imageCache = {}
+        local function cardImageUrl(image)
+            local id = image and tostring(image):match("(%d+)")
+            if not id then return nil end
+            if imageCache[id] ~= nil then return imageCache[id] or nil end
+            local data = getJson(
+                "https://thumbnails.roblox.com/v1/assets?assetIds=" .. id
+                .. "&returnPolicy=PlaceHolder&size=420x420&format=Png")
+            local u = data and data.data and data.data[1] and data.data[1].imageUrl
+            imageCache[id] = u or false
+            return u
+        end
+
+        local gameName = "Roblox"
+        pcall(function()
+            gameName = MarketplaceService:GetProductInfo(game.PlaceId).Name
+        end)
+
+        -- ---------- อ่าน UI ----------
         local function shown(inst)
             local cur = inst
             while cur and cur ~= PlayerGui do
@@ -562,11 +611,25 @@ if WEBHOOK_ENABLED then
             return (txt:gsub("^[%p%s]+", ""):gsub("[%p%s]+$", ""))
         end
 
+        local function alnum(b)
+            return b and ((b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122))
+        end
+
         local function isDecorated(txt)
             local c = core(txt)
             if c == "" or c == txt then return false end
-            local function alnum(b) return (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) end
             return not alnum(txt:byte(1)) and not alnum(txt:byte(-1))
+        end
+
+        local function biggestImage(node)
+            local best, area = nil, 0
+            for _, d in ipairs(node:GetDescendants()) do
+                if (d:IsA("ImageLabel") or d:IsA("ImageButton")) and d.Image ~= "" then
+                    local a = d.AbsoluteSize.X * d.AbsoluteSize.Y
+                    if a > area then best, area = d, a end
+                end
+            end
+            return best and best.Image
         end
 
         -- หา popup การ์ด: 3 บรรทัดที่มีสัญลักษณ์ตกแต่ง เรียงบนลงล่าง = ชื่อ, Rarity, Theme
@@ -590,7 +653,12 @@ if WEBHOOK_ENABLED then
                     end
                     if #group == 3 then
                         table.sort(group, function(x, y) return x.y < y.y end)
-                        return core(group[1].text), core(group[2].text), core(group[3].text)
+                        return {
+                            name = core(group[1].text),
+                            rarity = core(group[2].text),
+                            theme = core(group[3].text),
+                            image = biggestImage(node),
+                        }
                     elseif #group > 3 then
                         break
                     end
@@ -599,74 +667,124 @@ if WEBHOOK_ENABLED then
             end
         end
 
-        -- โหมด debug: getgenv().AntiAFK_Debug = true จะรายงานข้อความใหม่ที่ปรากฏบนจอ
-        local seen = {}
-        local debugBuf = {}
+        local function readMoney()
+            local hud = PlayerGui:FindFirstChild("HUD_MoneyBar")
+            local amount = hud and hud:FindFirstChild("Amount", true)
+            if amount and amount:IsA("TextLabel") then
+                return clean(amount.Text)
+            end
+        end
+
+        local function readIncome()
+            for _, l in ipairs(PlayerGui:GetDescendants()) do
+                if l:IsA("TextLabel") and shown(l) then
+                    local tx = clean(l.Text)
+                    if tx:match("^%+%$[%d%.,]+%a*/[sS]$") then return tx end
+                end
+            end
+        end
+
+        -- ---------- สร้างข้อความแบบ embed ----------
+        local RARITY_COLORS = {
+            COMMON = 0x9AA0A6, RARE = 0x3498DB, EPIC = 0x9B59B6, LEGENDARY = 0xF1C40F,
+            MYTHIC = 0xE74C3C, SECRET = 0x2C2F33, SUPA = 0xEB459E, CELESTIAL = 0x1ABC9C,
+        }
+
+        local function cardEmbed(card)
+            local lines = {
+                string.format("**%s** · %s", card.name, card.rarity),
+                "💎 **Rarity:** " .. card.rarity,
+                "🎨 **Theme:** " .. card.theme,
+            }
+            local money, income = readMoney(), readIncome()
+            if money then lines[#lines + 1] = "💰 **Money:** " .. money end
+            if income then lines[#lines + 1] = "⚡ **Income:** " .. income end
+
+            local embed = {
+                author = { name = LocalPlayer.Name, icon_url = avatarUrl },
+                title = "🎴 Card Pulled!",
+                description = table.concat(lines, "\n"),
+                color = RARITY_COLORS[card.rarity:upper()] or 0x5865F2,
+                footer = { text = "Anti AFK • " .. gameName },
+                timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            }
+            local img = cardImageUrl(card.image)
+            if img then embed.thumbnail = { url = img } end
+            return embed
+        end
+
+        -- ---------- โหมด debug ----------
+        -- เปิดด้วย getgenv().AntiAFK_Debug = true
+        -- รายงานเฉพาะข้อความที่ "เพิ่งโผล่ขึ้นมาใหม่" (ไม่รายงานตัวเลขที่เปลี่ยนตลอด เช่น เงิน, เวลา)
+        -- ส่งไม่เกิน 1 ครั้งต่อ 10 วินาที และปิดตัวเองหลัง 5 นาที
+        local DEBUG_DURATION = 300
+        local debugStart = os.clock()
+        local seenVisible = {}
         local debugReady = false
+        local debugBuf, debugSeenText = {}, {}
+
         local function debugScan()
             for _, l in ipairs(PlayerGui:GetDescendants()) do
-                if l:IsA("TextLabel") then
-                    local tx = clean(l.Text)
-                    if shown(l) and tx ~= "" then
-                        if seen[l] ~= tx then
-                            if debugReady then
-                                debugBuf[#debugBuf + 1] = string.format("[%s] %q", l:GetFullName():sub(-60), tx)
-                            end
-                            seen[l] = tx
+                if l:IsA("TextLabel") or l:IsA("TextButton") then
+                    local vis = shown(l) and clean(l.Text) ~= ""
+                    if vis and not seenVisible[l] and debugReady then
+                        local tx = clean(l.Text)
+                        -- ข้ามข้อความที่มีตัวเลข และข้อความที่รายงานไปแล้ว
+                        if not tx:find("%d") and not debugSeenText[tx] then
+                            debugSeenText[tx] = true
+                            local path = l:GetFullName():gsub("^Players%.[^%.]+%.PlayerGui%.", "")
+                            debugBuf[#debugBuf + 1] = string.format("%s\n   = %q", path:sub(-70), tx)
                         end
-                    else
-                        seen[l] = nil
                     end
+                    seenVisible[l] = vis or nil
                 end
             end
             debugReady = true
         end
 
-        local RARITY_COLOR = 0xEB459E
+        -- ---------- ลูปหลัก ----------
         local lastKey, missing = nil, 0
 
         task.spawn(function()
-            local okFirst = send({
-                title = "Anti AFK เชื่อมต่อ Webhook แล้ว",
-                description = "ผู้เล่น: " .. LocalPlayer.Name,
+            task.wait(2) -- รอรูปโปรไฟล์
+            local okFirst = send({ embeds = { {
+                author = { name = LocalPlayer.Name, icon_url = avatarUrl },
+                title = "✅ Anti AFK เชื่อมต่อแล้ว",
+                description = "เกม: " .. gameName,
                 color = 0x57F287,
-            })
+                timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            } } })
             webhookStatus = okFirst and "พร้อม (ส่งทดสอบแล้ว)" or "ส่งทดสอบไม่สำเร็จ"
+
             local lastFlush = os.clock()
             while gui.Parent do
-                if env.AntiAFK_Debug then
+                if env.AntiAFK_Debug and os.clock() - debugStart < DEBUG_DURATION then
                     pcall(debugScan)
-                    if #debugBuf > 0 and os.clock() - lastFlush > 3 then
+                    if #debugBuf > 0 and os.clock() - lastFlush > 10 then
                         local text = table.concat(debugBuf, "\n")
                         debugBuf = {}
                         lastFlush = os.clock()
                         print("[Anti AFK Debug]\n" .. text)
-                        send({ title = "Debug: ข้อความใหม่บนจอ", description = "```\n" .. text:sub(1, 3500) .. "\n```", color = 0xFEE75C })
+                        send({ embeds = { {
+                            title = "🔧 Debug: ข้อความที่เพิ่งโผล่บนจอ",
+                            description = "```\n" .. text:sub(1, 3800) .. "\n```",
+                            color = 0xFEE75C,
+                        } } })
                     end
                 end
 
-                local ok, name, rarity, theme = pcall(scanCard)
-                if ok and name then
+                local ok, card = pcall(scanCard)
+                if ok and card then
                     missing = 0
-                    local key = name .. "|" .. rarity .. "|" .. theme
+                    local key = card.name .. "|" .. card.rarity .. "|" .. card.theme
                     if key ~= lastKey then
                         lastKey = key
-                        local sent = send({
-                            title = "🎴 สุ่มได้การ์ดใหม่",
-                            color = RARITY_COLOR,
-                            fields = {
-                                { name = "ชื่อการ์ด", value = name, inline = true },
-                                { name = "Rarity", value = rarity, inline = true },
-                                { name = "Theme", value = theme, inline = false },
-                            },
-                            footer = { text = LocalPlayer.Name },
-                            timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-                        })
-                        webhookStatus = sent and ("ส่งแล้ว: " .. name) or "ส่งไม่สำเร็จ"
+                        local sent = send({ embeds = { cardEmbed(card) } })
+                        webhookStatus = sent and ("ส่งแล้ว: " .. card.name) or "ส่งไม่สำเร็จ"
                         print("[Anti AFK] การ์ด: " .. key)
                     end
                 elseif not ok then
-                    warn("[Anti AFK] scanCard error: " .. tostring(name))
+                    warn("[Anti AFK] scanCard error: " .. tostring(card))
                 else
                     missing += 1
                     if missing >= 4 then lastKey = nil end -- popup หายไปแล้ว รอการ์ดใบถัดไป
