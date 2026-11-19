@@ -37,6 +37,12 @@ local kickBlocked = 0
 local reconnectStatus = "ON"
 local eventStatus = "กำลังเริ่ม"
 local rebirthStatus = "กำลังอ่านค่า..."
+local webhookStatus = "กำลังเริ่ม"
+
+-- ตั้งค่า Discord Webhook แจ้งเตือนการ์ด
+-- ตั้ง URL ก่อนรัน loadstring ด้วย getgenv().AntiAFK_Webhook = "https://discord.com/api/webhooks/..."
+-- หรือเก็บไว้ในไฟล์ AntiAFK_Webhook.txt ในโฟลเดอร์ workspace ของ executor
+local WEBHOOK_ENABLED = true
 
 -- ตั้งค่าตัวคำนวณเวลา Rebirth
 local REBIRTH_ENABLED = true
@@ -75,7 +81,7 @@ end)
 gui.Parent = getGuiParent()
 
 local label = Instance.new("TextLabel")
-label.Size = UDim2.fromOffset(280, 98)
+label.Size = UDim2.fromOffset(280, 116)
 label.Position = UDim2.new(0, 10, 0, 10)
 label.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
 label.BackgroundTransparency = 0.25
@@ -98,12 +104,13 @@ end
 
 local function refresh()
     label.Text = string.format(
-        "Anti AFK: ON\nเวลาทำงาน %s | กันแล้ว %d ครั้ง\nAuto Reconnect: %s\nEvent: %s\nRebirth: %s",
+        "Anti AFK: ON\nเวลาทำงาน %s | กันแล้ว %d ครั้ง\nAuto Reconnect: %s\nEvent: %s\nRebirth: %s\nWebhook: %s",
         fmt(os.clock() - startTime),
         kickBlocked,
         reconnectStatus,
         eventStatus,
-        rebirthStatus
+        rebirthStatus,
+        webhookStatus
     )
 end
 refresh()
@@ -488,6 +495,140 @@ if REBIRTH_ENABLED then
             task.wait(2)
         end
     end)
+end
+-- ===== Discord Webhook แจ้งเตือนการ์ดที่สุ่มได้ =====
+if WEBHOOK_ENABLED then
+    local HttpService = game:GetService("HttpService")
+    local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+    local url = env.AntiAFK_Webhook
+    if not url and readfile and isfile then
+        pcall(function()
+            if isfile("AntiAFK_Webhook.txt") then
+                url = readfile("AntiAFK_Webhook.txt")
+            end
+        end)
+    end
+    if url then url = url:gsub("%s+", "") end
+
+    local httpRequest = request or http_request
+        or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request)
+
+    local valid = url and (url:match("^https://discord%.com/api/webhooks/")
+        or url:match("^https://discordapp%.com/api/webhooks/"))
+
+    if not valid then
+        webhookStatus = "ยังไม่ได้ตั้ง URL"
+    elseif not httpRequest then
+        webhookStatus = "executor ไม่รองรับ request"
+    else
+        webhookStatus = "พร้อม"
+
+        local function send(embed)
+            local ok, res = pcall(httpRequest, {
+                Url = url,
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = HttpService:JSONEncode({ username = "Anti AFK", embeds = { embed } }),
+            })
+            local code = ok and res and res.StatusCode
+            if not (code and code >= 200 and code < 300) then
+                warn("[Anti AFK] ส่ง Webhook ไม่สำเร็จ: " .. tostring(ok and code or res))
+                return false
+            end
+            return true
+        end
+
+        local function shown(inst)
+            local cur = inst
+            while cur and cur ~= PlayerGui do
+                if cur:IsA("GuiObject") and not cur.Visible then return false end
+                if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+                cur = cur.Parent
+            end
+            return cur == PlayerGui
+        end
+
+        local function clean(txt)
+            return (txt:gsub("<[^>]->", ""):gsub("^%s+", ""):gsub("%s+$", ""))
+        end
+
+        local function themeOf(txt)
+            return txt:match("^%-%s*(.-)%s*%-$") or txt:match("^–%s*(.-)%s*–$")
+        end
+
+        -- หา popup การ์ด: บรรทัด "• RARITY •" และ "- THEME -" ใต้ชื่อการ์ด
+        local function scanCard()
+            for _, l in ipairs(PlayerGui:GetDescendants()) do
+                if l:IsA("TextLabel") and shown(l) then
+                    local rarity = clean(l.Text):match("^•%s*(.-)%s*•$")
+                    if rarity and rarity ~= "" then
+                        local rarY = l.AbsolutePosition.Y
+                        local node = l.Parent
+                        for _ = 1, 5 do
+                            if not node or node == PlayerGui then break end
+                            local theme, name, nameY
+                            for _, d in ipairs(node:GetDescendants()) do
+                                if d:IsA("TextLabel") and d ~= l and shown(d) then
+                                    local tx = clean(d.Text)
+                                    local y = d.AbsolutePosition.Y
+                                    local th = themeOf(tx)
+                                    if th and th ~= "" and y > rarY then
+                                        theme = th
+                                    elseif tx ~= "" and y < rarY and (not nameY or y > nameY) then
+                                        name, nameY = tx, y
+                                    end
+                                end
+                            end
+                            if theme and name then
+                                name = clean(name:gsub("✨", ""))
+                                return name, rarity, theme
+                            end
+                            node = node.Parent
+                        end
+                    end
+                end
+            end
+        end
+
+        local RARITY_COLOR = 0xEB459E
+        local lastKey, missing = nil, 0
+
+        task.spawn(function()
+            send({
+                title = "Anti AFK เชื่อมต่อ Webhook แล้ว",
+                description = "ผู้เล่น: " .. LocalPlayer.Name,
+                color = 0x57F287,
+            })
+            while gui.Parent do
+                local ok, name, rarity, theme = pcall(scanCard)
+                if ok and name then
+                    missing = 0
+                    local key = name .. "|" .. rarity .. "|" .. theme
+                    if key ~= lastKey then
+                        lastKey = key
+                        local sent = send({
+                            title = "🎴 สุ่มได้การ์ดใหม่",
+                            color = RARITY_COLOR,
+                            fields = {
+                                { name = "ชื่อการ์ด", value = name, inline = true },
+                                { name = "Rarity", value = rarity, inline = true },
+                                { name = "Theme", value = theme, inline = false },
+                            },
+                            footer = { text = LocalPlayer.Name },
+                            timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+                        })
+                        webhookStatus = sent and ("ส่งแล้ว: " .. name) or "ส่งไม่สำเร็จ"
+                        print("[Anti AFK] การ์ด: " .. key)
+                    end
+                else
+                    missing += 1
+                    if missing >= 4 then lastKey = nil end -- popup หายไปแล้ว รอการ์ดใบถัดไป
+                end
+                task.wait(0.5)
+            end
+        end)
+    end
 end
 notify("เปิดใช้งานแล้ว")
 print("[Anti AFK] เปิดใช้งานแล้ว")
