@@ -632,8 +632,34 @@ if WEBHOOK_ENABLED then
             return best and best.Image
         end
 
-        -- หา popup การ์ด: 3 บรรทัดที่มีสัญลักษณ์ตกแต่ง เรียงบนลงล่าง = ชื่อ, Rarity, Theme
+        -- วิธีหลัก: อ่านจาก PlayerGui.CardDisplayGui.CardTemplate ที่ขึ้นตอนสุ่มการ์ด
+        local function scanCardDisplay()
+            local display = PlayerGui:FindFirstChild("CardDisplayGui")
+            if not display then return nil end
+            for _, tpl in ipairs(display:GetDescendants()) do
+                if tpl.Name == "CardTemplate" and shown(tpl) then
+                    local n = tpl:FindFirstChild("NameLabel", true)
+                    local r = tpl:FindFirstChild("RarityLabel", true)
+                    local t = tpl:FindFirstChild("ThemeLabel", true)
+                    if n and r and t and n:IsA("TextLabel") and shown(n) then
+                        local name = core(clean(n.Text))
+                        if name ~= "" then
+                            return {
+                                name = name,
+                                rarity = core(clean(r.Text)),
+                                theme = core(clean(t.Text)),
+                                image = biggestImage(tpl),
+                            }
+                        end
+                    end
+                end
+            end
+        end
+
+        -- วิธีสำรอง: 3 บรรทัดที่มีสัญลักษณ์ตกแต่ง เรียงบนลงล่าง = ชื่อ, Rarity, Theme
         local function scanCard()
+            local direct = scanCardDisplay()
+            if direct then return direct end
             local deco = {}
             for _, l in ipairs(PlayerGui:GetDescendants()) do
                 if l:IsA("TextLabel") and shown(l) then
@@ -713,66 +739,12 @@ if WEBHOOK_ENABLED then
             return embed
         end
 
-        -- ---------- โหมด debug ----------
-        -- เปิดด้วย getgenv().AntiAFK_Debug = true
-        -- รายงานเฉพาะข้อความที่ "เพิ่งโผล่ขึ้นมาใหม่" (ไม่รายงานตัวเลขที่เปลี่ยนตลอด เช่น เงิน, เวลา)
-        -- ส่งไม่เกิน 1 ครั้งต่อ 10 วินาที และปิดตัวเองหลัง 5 นาที
-        local DEBUG_DURATION = 300
-        local debugStart = os.clock()
-        local seenVisible = {}
-        local debugReady = false
-        local debugBuf, debugSeenText = {}, {}
-
-        local function debugScan()
-            for _, l in ipairs(PlayerGui:GetDescendants()) do
-                if l:IsA("TextLabel") or l:IsA("TextButton") then
-                    local vis = shown(l) and clean(l.Text) ~= ""
-                    if vis and not seenVisible[l] and debugReady then
-                        local tx = clean(l.Text)
-                        -- ข้ามข้อความที่มีตัวเลข และข้อความที่รายงานไปแล้ว
-                        if not tx:find("%d") and not debugSeenText[tx] then
-                            debugSeenText[tx] = true
-                            local path = l:GetFullName():gsub("^Players%.[^%.]+%.PlayerGui%.", "")
-                            debugBuf[#debugBuf + 1] = string.format("%s\n   = %q", path:sub(-70), tx)
-                        end
-                    end
-                    seenVisible[l] = vis or nil
-                end
-            end
-            debugReady = true
-        end
-
         -- ---------- ลูปหลัก ----------
         local lastKey, missing = nil, 0
 
         task.spawn(function()
-            task.wait(2) -- รอรูปโปรไฟล์
-            local okFirst = send({ embeds = { {
-                author = { name = LocalPlayer.Name, icon_url = avatarUrl },
-                title = "✅ Anti AFK เชื่อมต่อแล้ว",
-                description = "เกม: " .. gameName,
-                color = 0x57F287,
-                timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-            } } })
-            webhookStatus = okFirst and "พร้อม (ส่งทดสอบแล้ว)" or "ส่งทดสอบไม่สำเร็จ"
-
-            local lastFlush = os.clock()
+            webhookStatus = "พร้อม (รอสุ่มการ์ด)"
             while gui.Parent do
-                if env.AntiAFK_Debug and os.clock() - debugStart < DEBUG_DURATION then
-                    pcall(debugScan)
-                    if #debugBuf > 0 and os.clock() - lastFlush > 10 then
-                        local text = table.concat(debugBuf, "\n")
-                        debugBuf = {}
-                        lastFlush = os.clock()
-                        print("[Anti AFK Debug]\n" .. text)
-                        send({ embeds = { {
-                            title = "🔧 Debug: ข้อความที่เพิ่งโผล่บนจอ",
-                            description = "```\n" .. text:sub(1, 3800) .. "\n```",
-                            color = 0xFEE75C,
-                        } } })
-                    end
-                end
-
                 local ok, card = pcall(scanCard)
                 if ok and card then
                     missing = 0
