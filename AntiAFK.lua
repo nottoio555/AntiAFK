@@ -36,6 +36,11 @@ local startTime = os.clock()
 local kickBlocked = 0
 local reconnectStatus = "ON"
 local eventStatus = "กำลังเริ่ม"
+local rebirthStatus = "กำลังอ่านค่า..."
+
+-- ตั้งค่าตัวคำนวณเวลา Rebirth
+local REBIRTH_ENABLED = true
+local REBIRTH_COST_OVERRIDE = nil   -- ใส่ตัวเลขเองได้ เช่น 160324880000 (ถ้า nil จะอ่านจากหน้า Rebirth)
 
 -- ตั้งค่า Event Lottery อัตโนมัติ (ทุกชั่วโมง นาทีที่ 00)
 local EVENT_ENABLED = true
@@ -70,7 +75,7 @@ end)
 gui.Parent = getGuiParent()
 
 local label = Instance.new("TextLabel")
-label.Size = UDim2.fromOffset(250, 80)
+label.Size = UDim2.fromOffset(280, 98)
 label.Position = UDim2.new(0, 10, 0, 10)
 label.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
 label.BackgroundTransparency = 0.25
@@ -93,11 +98,12 @@ end
 
 local function refresh()
     label.Text = string.format(
-        "Anti AFK: ON\nเวลาทำงาน %s | กันแล้ว %d ครั้ง\nAuto Reconnect: %s\nEvent: %s",
+        "Anti AFK: ON\nเวลาทำงาน %s | กันแล้ว %d ครั้ง\nAuto Reconnect: %s\nEvent: %s\nRebirth: %s",
         fmt(os.clock() - startTime),
         kickBlocked,
         reconnectStatus,
-        eventStatus
+        eventStatus,
+        rebirthStatus
     )
 end
 refresh()
@@ -363,6 +369,123 @@ if EVENT_ENABLED then
             end
             refresh()
             task.wait(1)
+        end
+    end)
+end
+-- ===== ตัวคำนวณเวลา Rebirth =====
+if REBIRTH_ENABLED then
+    local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+    local Camera = workspace.CurrentCamera
+    local SUFFIX = {
+        K = 1e3, M = 1e6, B = 1e9, T = 1e12, QA = 1e15, QI = 1e18,
+        SX = 1e21, SP = 1e24, OC = 1e27, NO = 1e30, DC = 1e33,
+    }
+    local cachedCost = REBIRTH_COST_OVERRIDE
+
+    local function parseNumber(s)
+        s = s:gsub("<[^>]->", ""):gsub("[%$%+,%s]", ""):gsub("/[sS]$", "")
+        local num, suf = s:match("^(%d+%.?%d*)(%a*)$")
+        if not num then return nil end
+        local mult = (suf == "") and 1 or SUFFIX[suf:upper()]
+        if not mult then return nil end
+        return tonumber(num) * mult
+    end
+
+    local function shown(inst)
+        local cur = inst
+        while cur and cur ~= PlayerGui do
+            if cur:IsA("GuiObject") and not cur.Visible then return false end
+            if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+            cur = cur.Parent
+        end
+        return cur == PlayerGui
+    end
+
+    local function labels(scope)
+        local list = {}
+        for _, d in ipairs(scope:GetDescendants()) do
+            if (d:IsA("TextLabel") or d:IsA("TextButton")) and shown(d) then
+                list[#list + 1] = d
+            end
+        end
+        return list
+    end
+
+    local function clean(txt)
+        return (txt:gsub("<[^>]->", ""):gsub("^%s+", ""):gsub("%s+$", ""))
+    end
+
+    -- อ่านเงินและรายได้/วินาทีจาก HUD มุมซ้ายล่าง
+    local function readHud()
+        local vp = Camera.ViewportSize
+        local money, moneyY, income, incomeY = nil, -1, nil, -1
+        for _, l in ipairs(labels(PlayerGui)) do
+            local pos = l.AbsolutePosition
+            if pos.X < vp.X * 0.4 and pos.Y > vp.Y * 0.5 then
+                local txt = clean(l.Text)
+                if txt:match("^%+?%$?[%d%.,]+%a*/[sS]$") then
+                    if pos.Y > incomeY then income, incomeY = parseNumber(txt), pos.Y end
+                elseif txt:match("^[%d,]+$") and #txt >= 4 then
+                    if pos.Y > moneyY then money, moneyY = parseNumber(txt), pos.Y end
+                end
+            end
+        end
+        return money, income
+    end
+
+    -- อ่านราคา Rebirth จากหน้าต่าง Rebirth (เห็นเฉพาะตอนเปิดหน้านั้น)
+    local function readCost()
+        for _, l in ipairs(labels(PlayerGui)) do
+            if clean(l.Text):upper() == "REBIRTH NOW" then
+                local root = l:FindFirstAncestorWhichIsA("ScreenGui")
+                local best
+                for _, c in ipairs(labels(root)) do
+                    local txt = clean(c.Text)
+                    if txt:match("^%$[%d,%.]+%a*$") then
+                        local v = parseNumber(txt)
+                        if v and (not best or v > best) then best = v end
+                    end
+                end
+                return best
+            end
+        end
+    end
+
+    local function fmtDur(sec)
+        sec = math.floor(sec)
+        if sec < 60 then return string.format("%d วินาที", sec) end
+        local h, m = sec // 3600, (sec % 3600) // 60
+        if h >= 24 then
+            return string.format("%d วัน %d ชม. %d นาที", h // 24, h % 24, m)
+        end
+        return string.format("%d ชม. %d นาที", h, m)
+    end
+
+    task.spawn(function()
+        while gui.Parent do
+            local ok, err = pcall(function()
+                local money, income = readHud()
+                if not REBIRTH_COST_OVERRIDE then
+                    cachedCost = readCost() or cachedCost
+                end
+
+                if not cachedCost then
+                    rebirthStatus = "เปิดหน้า Rebirth 1 ครั้งเพื่ออ่านราคา"
+                elseif not money or not income then
+                    rebirthStatus = "อ่านเงิน/รายได้ไม่ได้"
+                elseif money >= cachedCost then
+                    rebirthStatus = "เงินพอ Rebirth แล้ว"
+                elseif income <= 0 then
+                    rebirthStatus = "รายได้เป็น 0"
+                else
+                    rebirthStatus = "อีก " .. fmtDur((cachedCost - money) / income)
+                end
+            end)
+            if not ok then
+                warn("[Anti AFK] Rebirth error: " .. tostring(err))
+            end
+            refresh()
+            task.wait(2)
         end
     end)
 end
