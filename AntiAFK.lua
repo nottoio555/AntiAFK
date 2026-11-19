@@ -674,6 +674,8 @@ if WEBHOOK_ENABLED then
                 task.wait(0.5)
             end
         end)
+    end
 end
+
 notify("เปิดใช้งานแล้ว")
 print("[Anti AFK] เปิดใช้งานแล้ว")
