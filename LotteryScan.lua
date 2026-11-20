@@ -148,11 +148,15 @@ local function scanGc()
         return
     end
     local found = 0
+    -- ข้ามตารางของสคริปต์นี้เอง (ไม่งั้นจะเจอตัวเองซ้ำไปเรื่อยๆ)
+    local skip = { [env] = true, [seen] = true, [buffer] = true, [KEYWORDS] = true }
     for _, obj in ipairs(getgc(true)) do
-        if type(obj) == "table" then
-            local ok = pcall(function()
+        if type(obj) == "table" and not skip[obj] then
+            pcall(function()
                 for k, v in pairs(obj) do
                     if type(k) == "string" and hasKeyword(k)
+                        and not k:find("^__LotteryScan") and not k:find("^__AntiAFK")
+                        and not k:find("|", 1, true)
                         and (type(v) == "number" or type(v) == "string" or type(v) == "boolean") then
                         report("GC", k .. " = " .. ser(v))
                         found += 1
