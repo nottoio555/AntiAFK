@@ -29,13 +29,22 @@ local function notify(text)
     end)
 end
 
--- กันรันซ้ำ
+local SCRIPT_VERSION = "v2"
+
+-- กันรันซ้ำ: บอกเวอร์ชันที่รันอยู่ และเตือนถ้าโค้ดบน GitHub ใหม่กว่า
 if env.__AntiAFK_Loaded then
-    notify("ทำงานอยู่แล้ว")
-    print("[Anti AFK] ทำงานอยู่แล้ว ไม่ต้องรันซ้ำ")
+    local running = env.__AntiAFK_Version or "v1"
+    if running ~= SCRIPT_VERSION then
+        notify(string.format("กำลังรัน %s อยู่ มี %s แล้ว กรุณา rejoin", running, SCRIPT_VERSION))
+        print(string.format("[Anti AFK] กำลังรัน %s อยู่ มีเวอร์ชันใหม่ %s ให้ rejoin แล้วรันใหม่", running, SCRIPT_VERSION))
+    else
+        notify("ทำงานอยู่แล้ว (" .. running .. ")")
+        print("[Anti AFK] ทำงานอยู่แล้ว (" .. running .. ") ไม่ต้องรันซ้ำ")
+    end
     return
 end
 env.__AntiAFK_Loaded = true
+env.__AntiAFK_Version = SCRIPT_VERSION
 
 local startTime = os.clock()
 local kickBlocked = 0
@@ -148,7 +157,7 @@ local dot = make("Frame", {
 }, header)
 corner(dot, 5)
 make("TextLabel", {
-    Text = "ANTI AFK", Font = Enum.Font.GothamBlack, TextSize = 16, TextColor3 = THEME.text,
+    Text = "ANTI AFK  " .. SCRIPT_VERSION, Font = Enum.Font.GothamBlack, TextSize = 16, TextColor3 = THEME.text,
     BackgroundTransparency = 1, Position = UDim2.fromOffset(20, 0), Size = UDim2.new(1, -60, 0, 18),
     TextXAlignment = Enum.TextXAlignment.Left,
 }, header)
@@ -203,7 +212,8 @@ end
 addRow("afk", "🛡️", "Anti AFK", 1)
 addRow("loading", "🚪", "ข้ามหน้าโหลด", 2)
 addRow("reconnect", "🔄", "Auto Reconnect", 3)
-addRow("event", "🎰", "Lottery Event", 4)
+addRow("event", "🎰", "Lottery " .. SCRIPT_VERSION
+    .. (EVENT_FIXED_NUMBER and " · เลขคงที่" or " · สุ่มเลข 00-99"), 4)
 addRow("rebirth", "⭐", "Rebirth", 5)
 addRow("webhook", "📨", "Discord Webhook", 6)
 
