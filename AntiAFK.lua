@@ -29,7 +29,7 @@ local function notify(text)
     end)
 end
 
-local SCRIPT_VERSION = "v3.3"
+local SCRIPT_VERSION = "v3.4"
 
 -- กันรันซ้ำ: บอกเวอร์ชันที่รันอยู่ และเตือนถ้าโค้ดบน GitHub ใหม่กว่า
 if env.__AntiAFK_Loaded then
@@ -1509,28 +1509,65 @@ do
                 end
             end
         end
-        return cards, unknown
+        return cards, unknown, list
     end
 
-    -- เลือก 6 แบบ: กระจายให้ครบทุกคนก่อน แล้วค่อยเติมด้วยธีมอื่นของคนเดิม (ใช้ใบที่มีจำนวนมากก่อน)
-    local function pickCards(cards)
+    -- อ่านชื่อการ์ดที่อยู่ในช่อง Fuse แล้ว (แถวช่องด้านบน ระหว่างหัวข้อกับรายการการ์ด)
+    local function readSlots(root, fuseBtn, list)
+        local top = fuseBtn.AbsolutePosition.Y - 120
+        local bottom = list.AbsolutePosition.Y - 5
+        local names = {}
+        for _, t in ipairs(textsOf(root)) do
+            if not t.inst:IsDescendantOf(list) and shown(t.inst) then
+                local y = t.inst.AbsolutePosition.Y
+                local letters = t.up:gsub("[^A-Z]", "")
+                if y > top and y < bottom and memberSet[letters] then
+                    names[#names + 1] = letters
+                end
+            end
+        end
+        return names
+    end
+
+    -- การ์ดที่กดแล้วไม่เข้าช่อง (เช่น ถูกล็อกหรือใช้อยู่) จะข้ามไปจนกว่าจะ Fuse สำเร็จ
+    local failedTiles = setmetatable({}, { __mode = "k" })
+
+    -- ใส่การ์ดลงช่องจนครบ: กดทีละใบ แล้วเช็กว่าจำนวนการ์ดในช่องเพิ่มขึ้นจริง
+    local function fillSlots(root, fuseBtn, cards, list)
+        local inSlots = readSlots(root, fuseBtn, list)
+        if #inSlots >= FUSE_SLOTS then return true, inSlots, {} end
+
+        local have = {}
+        for _, n in ipairs(inSlots) do have[n] = true end
         table.sort(cards, function(a, b) return a.count > b.count end)
-        local chosen, usedName, usedTile = {}, {}, {}
-        for _, c in ipairs(cards) do
-            if #chosen >= FUSE_SLOTS then break end
-            if not usedName[c.name] then
-                chosen[#chosen + 1] = c
-                usedName[c.name], usedTile[c.tile] = true, true
+        -- คนที่ยังไม่มีในช่องมาก่อน แล้วค่อยเป็นธีมอื่นของคนที่มีแล้ว
+        local order = {}
+        for _, c in ipairs(cards) do if not have[c.name] then order[#order + 1] = c end end
+        for _, c in ipairs(cards) do if have[c.name] then order[#order + 1] = c end end
+
+        local failedNames = {}
+        for _, c in ipairs(order) do
+            if #inSlots >= FUSE_SLOTS then break end
+            if not failedTiles[c.tile] and c.tile:IsDescendantOf(PlayerGui) then
+                local before = #inSlots
+                press(c.tile)
+                local after = before
+                for _ = 1, 6 do
+                    task.wait(0.35)
+                    after = #readSlots(root, fuseBtn, list)
+                    if after ~= before then break end
+                end
+                if after > before then
+                    inSlots = readSlots(root, fuseBtn, list)
+                else
+                    if after < before then press(c.tile) task.wait(0.5) end -- กดแล้วการ์ดออกจากช่อง ให้ใส่กลับ
+                    failedTiles[c.tile] = true
+                    failedNames[#failedNames + 1] = c.name .. " x" .. c.count
+                    warn("[Anti AFK] Fuse: กดการ์ด " .. c.name .. " x" .. c.count .. " แล้วไม่เข้าช่อง")
+                end
             end
         end
-        for _, c in ipairs(cards) do
-            if #chosen >= FUSE_SLOTS then break end
-            if not usedTile[c.tile] then
-                chosen[#chosen + 1] = c
-                usedTile[c.tile] = true
-            end
-        end
-        return chosen
+        return #inSlots >= FUSE_SLOTS, inSlots, failedNames
     end
 
     local function readMoney()
@@ -1605,16 +1642,18 @@ do
                         fuseStatus = "ไม่พบปุ่ม FUSION"
                         return
                     end
-                    local cards, unknown = readCards(root, fuseBtn)
+                    local cards, unknown, list = readCards(root, fuseBtn)
                     if not cards then
                         fuseStatus = "ไม่พบรายการการ์ด"
                         return
                     end
 
-                    if #cards < FUSE_SLOTS then
+                    -- การ์ดที่อยู่ในช่องแล้วอาจหายจากรายการ จึงนับรวมกัน
+                    local slotCount = #readSlots(root, fuseBtn, list)
+                    if #cards + slotCount < FUSE_SLOTS then
                         local names = {}
                         for _, c in ipairs(cards) do names[#names + 1] = c.name .. " x" .. c.count end
-                        fuseStatus = string.format("การ์ดไม่พอ (มี %d/%d แบบ) · Fuse แล้ว %d ครั้ง", #cards, FUSE_SLOTS, fuseDone)
+                        fuseStatus = string.format("การ์ดไม่พอ (มี %d/%d แบบ) · Fuse แล้ว %d ครั้ง", #cards + slotCount, FUSE_SLOTS, fuseDone)
                         local log = table.concat(names, ", ") .. " | อ่านชื่อไม่ได้: " .. table.concat(unknown, ", ")
                         if log ~= lastUnknownLog then
                             lastUnknownLog = log
@@ -1628,14 +1667,14 @@ do
                         return
                     end
 
-                    local chosen = pickCards(cards)
-                    local names = {}
                     fuseStatus = "กำลังใส่การ์ด..."
                     refresh()
-                    for _, c in ipairs(chosen) do
-                        press(c.tile)
-                        names[#names + 1] = c.name
-                        task.wait(0.5)
+                    local full, names, failedNames = fillSlots(root, fuseBtn, cards, list)
+                    if not full then
+                        fuseStatus = string.format("ใส่การ์ดได้ %d/%d · กดไม่ติด: %s",
+                            #names, FUSE_SLOTS, #failedNames > 0 and table.concat(failedNames, ", ") or "-")
+                        waitTime = FUSE_DELAY
+                        return
                     end
                     local before = totalCount(cards)
                     press(fuseBtn)
@@ -1652,6 +1691,7 @@ do
                     if after and totalCount(after) < before then
                         fuseDone += 1
                         fuseFails = 0
+                        failedTiles = setmetatable({}, { __mode = "k" })
                         fuseStatus = string.format("Fuse สำเร็จ %d ครั้ง · ทำต่อ...", fuseDone)
                         print(string.format("[Anti AFK] Fuse สำเร็จ: %s (กดรับ %d ครั้ง)", table.concat(names, " + "), claimed))
                         waitTime = 0.5 -- ผสมต่อทันที
