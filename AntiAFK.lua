@@ -29,7 +29,7 @@ local function notify(text)
     end)
 end
 
-local SCRIPT_VERSION = "v3.2"
+local SCRIPT_VERSION = "v3.3"
 
 -- กันรันซ้ำ: บอกเวอร์ชันที่รันอยู่ และเตือนถ้าโค้ดบน GitHub ใหม่กว่า
 if env.__AntiAFK_Loaded then
@@ -1475,6 +1475,8 @@ do
         end
     end
 
+    -- อ่านการ์ดในรายการด้านล่างของหน้า Fusion
+    -- 1 ช่องในรายการ = การ์ด 1 แบบ (คนเดียวกันต่างธีมนับเป็นคนละแบบ ผสมรวมกันได้)
     local function readCards(root, fuseBtn)
         local list
         for _, d in ipairs(root:GetDescendants()) do
@@ -1484,28 +1486,51 @@ do
             end
         end
         if not list then return nil end
-        local best = {}
+        local cards, unknown = {}, {}
         for _, tile in ipairs(list:GetChildren()) do
             if tile:IsA("GuiObject") and tile.Visible then
-                local name, count, skip = nil, 1, false
-                for _, t in ipairs(textsOf(tile)) do
-                    local n = t.up:gsub("%s+", "")
-                    if memberSet[n] then name = n end
-                    local c = t.up:match("^X(%d+)$")
+                local name, count, special = nil, 1, false
+                local texts = textsOf(tile)
+                for _, t in ipairs(texts) do
+                    -- เทียบเฉพาะตัวอักษร เช่น "✨ Ruka" -> RUKA
+                    local letters = t.up:gsub("[^A-Z]", "")
+                    if memberSet[letters] then name = letters end
+                    local c = t.up:match("^X%s*(%d+)$")
                     if c then count = tonumber(c) end
-                    -- ไม่ใช้การ์ดพิเศษ (PRISM, HOLO, SHINY หรือชื่อที่มีวงเล็บ)
-                    if t.up:find("PRISM") or t.up:find("HOLO") or t.up:find("SHINY") or t.up:find("%(") then
-                        skip = true
-                    end
+                    -- ไม่ใช้การ์ดพิเศษ (PRISM, HOLO, SHINY)
+                    if t.up:find("PRISM") or t.up:find("HOLO") or t.up:find("SHINY") then special = true end
                 end
-                if name and not skip and (not FUSE_KEEP_ONE or count >= 2) then
-                    if not best[name] or count > best[name].count then
-                        best[name] = { tile = tile, count = count }
+                if name and not special then
+                    if not FUSE_KEEP_ONE or count >= 2 then
+                        cards[#cards + 1] = { tile = tile, name = name, count = count }
                     end
+                elseif not name and #texts > 0 then
+                    unknown[#unknown + 1] = texts[1].text
                 end
             end
         end
-        return best
+        return cards, unknown
+    end
+
+    -- เลือก 6 แบบ: กระจายให้ครบทุกคนก่อน แล้วค่อยเติมด้วยธีมอื่นของคนเดิม (ใช้ใบที่มีจำนวนมากก่อน)
+    local function pickCards(cards)
+        table.sort(cards, function(a, b) return a.count > b.count end)
+        local chosen, usedName, usedTile = {}, {}, {}
+        for _, c in ipairs(cards) do
+            if #chosen >= FUSE_SLOTS then break end
+            if not usedName[c.name] then
+                chosen[#chosen + 1] = c
+                usedName[c.name], usedTile[c.tile] = true, true
+            end
+        end
+        for _, c in ipairs(cards) do
+            if #chosen >= FUSE_SLOTS then break end
+            if not usedTile[c.tile] then
+                chosen[#chosen + 1] = c
+                usedTile[c.tile] = true
+            end
+        end
+        return chosen
     end
 
     local function readMoney()
@@ -1514,15 +1539,59 @@ do
         return amount and amount:IsA("TextLabel") and parseNumber(clean(amount.Text))
     end
 
-    local function totalCount(best)
+    local function totalCount(cards)
         local n = 0
-        for _, v in pairs(best) do n += v.count end
+        for _, v in ipairs(cards) do n += v.count end
         return n
     end
 
+    -- หน้ารับรางวัลหลัง Fuse: หาปุ่มที่มีคำว่า CLAIM / COLLECT / OK ฯลฯ
+    -- ถ้าไม่มีปุ่ม แต่มีการ์ดโชว์อยู่ (CardDisplayGui) ให้คลิกที่การ์ดเพื่อรับ
+    local CLAIM_WORDS = { "CLAIM", "COLLECT", "RECEIVE", "OK", "CONTINUE", "TAP", "CLICK", "AWESOME", "NICE" }
+    local CLAIM_THAI = { "รับ", "ตกลง", "แตะ", "คลิก" }
+    local function findClaim(fuseBtn)
+        for _, d in ipairs(PlayerGui:GetDescendants()) do
+            if (d:IsA("TextButton") or d:IsA("TextLabel")) and d ~= fuseBtn and shown(d) then
+                local up = clean(d.Text):upper()
+                if up ~= "" and #up <= 30 and not up:find("^FUSION") then
+                    for _, w in ipairs(CLAIM_WORDS) do
+                        if up:find("%f[%a]" .. w .. "%f[%A]") then return d end
+                    end
+                    for _, w in ipairs(CLAIM_THAI) do
+                        if up:find(w, 1, true) then return d end
+                    end
+                end
+            end
+        end
+        local display = PlayerGui:FindFirstChild("CardDisplayGui")
+        if display and display:IsA("ScreenGui") and display.Enabled then
+            for _, d in ipairs(display:GetDescendants()) do
+                if d:IsA("GuiObject") and d.Name == "CardTemplate" and shown(d) then return d end
+            end
+        end
+    end
+
+    local function claimReward(fuseBtn)
+        local claimed = 0
+        for _ = 1, 16 do
+            task.wait(0.5)
+            local target = findClaim(fuseBtn)
+            if target then
+                press(target)
+                claimed += 1
+                task.wait(0.8)
+            elseif claimed > 0 then
+                break
+            end
+        end
+        return claimed
+    end
+
     local fuseDone, fuseFails = 0, 0
+    local lastUnknownLog = ""
     task.spawn(function()
         while gui.Parent do
+            local waitTime = 1
             if settings.autoFuse then
                 if fuseFails >= 3 then fuseFails = 0 end -- ผู้ใช้เปิดใหม่เอง
                 local ok, err = pcall(function()
@@ -1536,16 +1605,21 @@ do
                         fuseStatus = "ไม่พบปุ่ม FUSION"
                         return
                     end
-                    local best = readCards(root, fuseBtn)
-                    if not best then
+                    local cards, unknown = readCards(root, fuseBtn)
+                    if not cards then
                         fuseStatus = "ไม่พบรายการการ์ด"
                         return
                     end
 
-                    local pool = {}
-                    for name, v in pairs(best) do pool[#pool + 1] = { name = name, tile = v.tile, count = v.count } end
-                    if #pool < FUSE_SLOTS then
-                        fuseStatus = string.format("การ์ดไม่พอ (มี %d/%d แบบ) · Fuse แล้ว %d ครั้ง", #pool, FUSE_SLOTS, fuseDone)
+                    if #cards < FUSE_SLOTS then
+                        local names = {}
+                        for _, c in ipairs(cards) do names[#names + 1] = c.name .. " x" .. c.count end
+                        fuseStatus = string.format("การ์ดไม่พอ (มี %d/%d แบบ) · Fuse แล้ว %d ครั้ง", #cards, FUSE_SLOTS, fuseDone)
+                        local log = table.concat(names, ", ") .. " | อ่านชื่อไม่ได้: " .. table.concat(unknown, ", ")
+                        if log ~= lastUnknownLog then
+                            lastUnknownLog = log
+                            print("[Anti AFK] Fuse: การ์ดที่ใช้ได้ = " .. log)
+                        end
                         return
                     end
                     local money = readMoney()
@@ -1554,28 +1628,33 @@ do
                         return
                     end
 
-                    -- ใช้ใบที่มีจำนวนมากที่สุดก่อน
-                    table.sort(pool, function(a, b) return a.count > b.count end)
+                    local chosen = pickCards(cards)
                     local names = {}
                     fuseStatus = "กำลังใส่การ์ด..."
                     refresh()
-                    for i = 1, FUSE_SLOTS do
-                        press(pool[i].tile)
-                        names[#names + 1] = pool[i].name
+                    for _, c in ipairs(chosen) do
+                        press(c.tile)
+                        names[#names + 1] = c.name
                         task.wait(0.5)
                     end
-                    local before = totalCount(best)
+                    local before = totalCount(cards)
                     press(fuseBtn)
                     fuseStatus = "กำลัง Fuse..."
                     refresh()
-                    task.wait(FUSE_DELAY)
 
-                    local after = readCards(root, fuseBtn)
+                    -- กดรับรางวัลหลัง Fuse
+                    local claimed = claimReward(fuseBtn)
+                    task.wait(1)
+
+                    local root2, title2 = findFusion()
+                    local btn2 = root2 and findFuseButton(root2, title2)
+                    local after = btn2 and readCards(root2, btn2)
                     if after and totalCount(after) < before then
                         fuseDone += 1
                         fuseFails = 0
-                        fuseStatus = string.format("Fuse สำเร็จ %d ครั้ง", fuseDone)
-                        print("[Anti AFK] Fuse สำเร็จ: " .. table.concat(names, " + "))
+                        fuseStatus = string.format("Fuse สำเร็จ %d ครั้ง · ทำต่อ...", fuseDone)
+                        print(string.format("[Anti AFK] Fuse สำเร็จ: %s (กดรับ %d ครั้ง)", table.concat(names, " + "), claimed))
+                        waitTime = 0.5 -- ผสมต่อทันที
                     else
                         fuseFails += 1
                         fuseStatus = string.format("Fuse ไม่สำเร็จ (%d/3)", fuseFails)
@@ -1585,6 +1664,7 @@ do
                             fuseStatus = "Fuse ไม่สำเร็จ 3 ครั้ง · ปิด Auto Fuse แล้ว"
                             notify("Auto Fuse หยุดทำงาน")
                         end
+                        waitTime = FUSE_DELAY
                     end
                 end)
                 if not ok then
@@ -1594,7 +1674,7 @@ do
                 if fuseStatus:find("3 ครั้ง") == nil then fuseStatus = "ปิดอยู่" end
             end
             refresh()
-            task.wait(1)
+            task.wait(waitTime)
         end
     end)
 
