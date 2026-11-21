@@ -29,7 +29,7 @@ local function notify(text)
     end)
 end
 
-local SCRIPT_VERSION = "v3.1"
+local SCRIPT_VERSION = "v3.2"
 
 -- กันรันซ้ำ: บอกเวอร์ชันที่รันอยู่ และเตือนถ้าโค้ดบน GitHub ใหม่กว่า
 if env.__AntiAFK_Loaded then
@@ -55,10 +55,11 @@ local rebirthStatus = "กำลังอ่านค่า..."
 local webhookStatus = "กำลังเริ่ม"
 local lockStatus = "ปิดอยู่"
 local fuseStatus = "ปิดอยู่"
+local afkBuyStatus = "กำลังเริ่ม"
 
 -- ค่าเปิด/ปิดของปุ่ม Toggle (จำไว้ในไฟล์ จะได้ใช้ค่าเดิมหลัง rejoin)
 local SETTINGS_FILE = "AntiAFK_Settings.json"
-local settings = { autoLock = false, autoFuse = false }
+local settings = { autoLock = false, autoFuse = false, afkBuy = true }
 do
     local Http = game:GetService("HttpService")
     pcall(function()
@@ -86,6 +87,16 @@ local FUSE_MEMBERS = { "RUKA", "PHARITA", "ASA", "AHYEON", "RAMI", "RORA", "CHIQ
 local FUSE_SLOTS = 6
 local FUSE_KEEP_ONE = false         -- true = ใช้เฉพาะการ์ดที่มี x2 ขึ้นไป (เก็บไว้อย่างน้อย 1 ใบ)
 local FUSE_DELAY = 4                -- วินาทีระหว่างการ Fuse แต่ละครั้ง
+
+-- ตั้งค่า AFK Buy: ถ้าไม่ได้ขยับนานเกินเวลานี้ จะเปิด AFK MODE ให้ และตั้งให้ซื้อแพ็คท้ายๆ
+local AFK_BUY_IDLE = 300            -- วินาที (5 นาที)
+local AFK_BUY_LAST = 4              -- จำนวนแพ็คท้ายรายการที่ต้องเป็น BUYING เสมอ
+
+-- จดเวลาที่สคริปต์คลิกเอง เพื่อไม่ให้นับเป็นการขยับของผู้ใช้
+local lastSyntheticInput = 0
+local function markSynthetic()
+    lastSyntheticInput = os.clock()
+end
 
 -- ตั้งค่า Discord Webhook แจ้งเตือนการ์ด
 -- ตั้ง URL ก่อนรัน loadstring ด้วย getgenv().AntiAFK_Webhook = "https://discord.com/api/webhooks/..."
@@ -301,6 +312,9 @@ end)
 addRow("fuse", "🧬", "Auto Fuse", 8, "autoFuse", function(on)
     fuseStatus = on and "เปิดอยู่ · เปิดหน้า Fusion ค้างไว้" or "ปิดอยู่"
 end)
+addRow("afkbuy", "💤", "AFK Buy · ซื้อ " .. AFK_BUY_LAST .. " แพ็คท้าย", 9, "afkBuy", function(on)
+    afkBuyStatus = on and "เปิดอยู่" or "ปิดอยู่"
+end)
 
 -- ย่อ/ขยาย
 local collapsed = false
@@ -341,7 +355,7 @@ end
 local function toneOf(s)
     if s == "ปิดอยู่" or s == "ไม่พบหน้าโหลด" then return THEME.sub end
     if s:find("ไม่") or s:find("ล้มเหลว") or s:find("error") then return THEME.bad end
-    if s:find("รอบหน้า") then return THEME.ok end
+    if s:find("รอบหน้า") or s:find("รอ AFK") then return THEME.ok end
     if s:find("รอ") or s:find("กำลัง") or s:find("เปิดหน้า") then return THEME.warn end
     return THEME.ok
 end
@@ -363,6 +377,7 @@ local function refresh()
     setRow("webhook", webhookStatus)
     setRow("lock", lockStatus)
     setRow("fuse", fuseStatus)
+    setRow("afkbuy", afkBuyStatus)
 end
 refresh()
 
@@ -381,6 +396,7 @@ end
 
 env.__AntiAFK_Conn = LocalPlayer.Idled:Connect(function()
     pcall(function()
+        markSynthetic()
         VirtualUser:CaptureController()
         VirtualUser:ClickButton2(Vector2.new(0, 0))
     end)
@@ -463,9 +479,9 @@ if AUTO_SKIP_LOADING then
             local p, s = obj.AbsolutePosition, obj.AbsoluteSize
             local x, y = p.X + s.X / 2, p.Y + s.Y / 2
             pcall(function()
-                VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                markSynthetic(); VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
                 task.wait(0.05)
-                VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+                markSynthetic(); VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
             end)
         end
 
@@ -678,9 +694,9 @@ if EVENT_ENABLED then
             local inset = GuiService:GetGuiInset()
             x, y = x + inset.X, y + inset.Y
         end
-        VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+        markSynthetic(); VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
         task.wait(0.05)
-        VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+        markSynthetic(); VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
         return true
     end
 
@@ -1247,9 +1263,9 @@ do
             x, y = x + inset.X, y + inset.Y
         end
         pcall(function()
-            VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+            markSynthetic(); VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
             task.wait(0.05)
-            VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+            markSynthetic(); VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
         end)
     end
 
@@ -1579,6 +1595,152 @@ do
             end
             refresh()
             task.wait(1)
+        end
+    end)
+
+    -- ---------- AFK Buy ----------
+    -- จับเวลาที่ผู้ใช้ไม่ได้ขยับ (ไม่นับคลิกที่สคริปต์ทำเอง)
+    local lastInput = os.clock()
+    local USER_INPUTS = {
+        [Enum.UserInputType.Keyboard] = true, [Enum.UserInputType.MouseButton1] = true,
+        [Enum.UserInputType.MouseButton2] = true, [Enum.UserInputType.MouseButton3] = true,
+        [Enum.UserInputType.MouseMovement] = true, [Enum.UserInputType.MouseWheel] = true,
+        [Enum.UserInputType.Touch] = true, [Enum.UserInputType.Gamepad1] = true,
+    }
+    local function onInput(input)
+        if os.clock() - lastSyntheticInput < 1 then return end
+        if USER_INPUTS[input.UserInputType] then lastInput = os.clock() end
+    end
+    UserInputService.InputBegan:Connect(onInput)
+    UserInputService.InputChanged:Connect(onInput)
+
+    local Camera = workspace.CurrentCamera
+
+    local function findAfkWindow()
+        for _, sg in ipairs(PlayerGui:GetChildren()) do
+            if sg:IsA("ScreenGui") and sg.Enabled then
+                for _, t in ipairs(textsOf(sg)) do
+                    if t.up:find("AFK MODE ACTIVE", 1, true) and shown(t.inst) then
+                        return sg
+                    end
+                end
+            end
+        end
+    end
+
+    -- ปุ่ม AFK MODE (นาฬิกาสีแดง): หาจากชื่อก่อน ถ้าไม่เจอใช้ไอคอนขวาสุดของแถบไอคอนกลางจอด้านบน
+    local function findAfkButton()
+        for _, d in ipairs(PlayerGui:GetDescendants()) do
+            if d:IsA("GuiButton") and d.Name:lower():find("afk") and shown(d) then return d end
+        end
+        local vp = Camera.ViewportSize
+        local best
+        for _, d in ipairs(PlayerGui:GetDescendants()) do
+            if d:IsA("GuiButton") and shown(d) then
+                local s = d.AbsoluteSize
+                local cx = d.AbsolutePosition.X + s.X / 2
+                local cy = d.AbsolutePosition.Y + s.Y / 2
+                if s.X >= 25 and s.X <= 120 and s.Y >= 25 and s.Y <= 120
+                    and cy < vp.Y * 0.2 and cx > vp.X * 0.3 and cx < vp.X * 0.7 then
+                    if not best or cx > best.AbsolutePosition.X + best.AbsoluteSize.X / 2 then best = d end
+                end
+            end
+        end
+        return best
+    end
+
+    -- ตั้งให้แพ็คท้ายรายการ AFK_BUY_LAST อันเป็น BUYING (กดทีละอัน แล้วสแกนใหม่)
+    local function configurePacks(root)
+        local packRows = {}
+        for _, t in ipairs(textsOf(root)) do
+            if (t.up == "BUYING" or t.up == "IGNORE") and shown(t.inst) then
+                packRows[#packRows + 1] = { btn = t.inst, state = t.up, y = t.inst.AbsolutePosition.Y }
+            end
+        end
+        if #packRows == 0 then return "norows", 0 end
+        table.sort(packRows, function(a, b) return a.y < b.y end)
+        for i = math.max(1, #packRows - AFK_BUY_LAST + 1), #packRows do
+            if packRows[i].state == "IGNORE" then
+                press(packRows[i].btn)
+                return "changed", #packRows
+            end
+        end
+        return "ok", #packRows
+    end
+
+    local nextOpenTry = 0
+    local configTries = 0
+    task.spawn(function()
+        while gui.Parent do
+            if settings.afkBuy then
+                local ok, err = pcall(function()
+                    local root = findAfkWindow()
+                    if root then
+                        if configTries >= 12 then
+                            afkBuyStatus = "ตั้งค่าแพ็คไม่ติด · เช็กหน้า AFK เอง"
+                            return
+                        end
+                        local result, total = configurePacks(root)
+                        if result == "ok" then
+                            configTries = 0
+                            afkBuyStatus = string.format("AFK MODE ทำงาน · ซื้อ %d แพ็คท้าย (จาก %d)",
+                                math.min(AFK_BUY_LAST, total), total)
+                        elseif result == "changed" then
+                            configTries += 1
+                            afkBuyStatus = "กำลังตั้งค่าแพ็คเป็น BUYING..."
+                        else
+                            afkBuyStatus = "ไม่พบรายการแพ็คในหน้า AFK"
+                        end
+                        return
+                    end
+
+                    configTries = 0
+                    local idle = os.clock() - lastInput
+                    if idle < AFK_BUY_IDLE then
+                        afkBuyStatus = "รอ AFK อีก " .. fmt(AFK_BUY_IDLE - idle)
+                        return
+                    end
+                    if os.clock() < nextOpenTry then
+                        afkBuyStatus = "เปิด AFK MODE ไม่ได้ · ลองใหม่ใน " .. fmt(nextOpenTry - os.clock())
+                        return
+                    end
+
+                    local btn = findAfkButton()
+                    if not btn then
+                        afkBuyStatus = "ไม่พบปุ่ม AFK MODE"
+                        nextOpenTry = os.clock() + 60
+                        return
+                    end
+                    afkBuyStatus = "กำลังเปิด AFK MODE..."
+                    refresh()
+                    press(btn)
+                    for _ = 1, 8 do
+                        task.wait(0.5)
+                        if findAfkWindow() then break end
+                        -- บางเกมต้องกดเริ่มอีกครั้ง
+                        for _, t in ipairs(textsOf(PlayerGui)) do
+                            if t.up == "START AFK" and shown(t.inst) then
+                                press(t.inst)
+                                break
+                            end
+                        end
+                    end
+                    if findAfkWindow() then
+                        print("[Anti AFK] เปิด AFK MODE แล้ว")
+                    else
+                        afkBuyStatus = "เปิด AFK MODE ไม่ได้"
+                        warn("[Anti AFK] AFK Buy: กดปุ่ม " .. btn:GetFullName() .. " แล้วไม่เห็นหน้า AFK MODE")
+                        nextOpenTry = os.clock() + AFK_BUY_IDLE
+                    end
+                end)
+                if not ok then
+                    afkBuyStatus = "error: " .. tostring(err):sub(1, 60)
+                end
+            else
+                afkBuyStatus = "ปิดอยู่"
+            end
+            refresh()
+            task.wait(2)
         end
     end)
 end
