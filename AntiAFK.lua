@@ -29,7 +29,7 @@ local function notify(text)
     end)
 end
 
-local SCRIPT_VERSION = "v3"
+local SCRIPT_VERSION = "v3.1"
 
 -- กันรันซ้ำ: บอกเวอร์ชันที่รันอยู่ และเตือนถ้าโค้ดบน GitHub ใหม่กว่า
 if env.__AntiAFK_Loaded then
@@ -84,7 +84,7 @@ local LOCK_TAGS = { "PRISM", "HOLO" }
 -- ตั้งค่า Auto Fuse: ใช้การ์ด 6 ใบที่ชื่อไม่ซ้ำกัน จากรายชื่อนี้
 local FUSE_MEMBERS = { "RUKA", "PHARITA", "ASA", "AHYEON", "RAMI", "RORA", "CHIQUITA" }
 local FUSE_SLOTS = 6
-local FUSE_KEEP_ONE = true          -- true = ใช้เฉพาะการ์ดที่มี x2 ขึ้นไป (เก็บไว้อย่างน้อย 1 ใบ)
+local FUSE_KEEP_ONE = false         -- true = ใช้เฉพาะการ์ดที่มี x2 ขึ้นไป (เก็บไว้อย่างน้อย 1 ใบ)
 local FUSE_DELAY = 4                -- วินาทีระหว่างการ Fuse แต่ละครั้ง
 
 -- ตั้งค่า Discord Webhook แจ้งเตือนการ์ด
@@ -1255,8 +1255,7 @@ do
 
     -- ---------- Auto Lock ----------
     local lockBroken = false
-    local lockDone, lockAlready = 0, 0
-    local checkedTiles = setmetatable({}, { __mode = "k" })
+    local lockDone = 0
 
     local function isOrange(c)
         return c.R > 0.75 and c.G > 0.3 and c.G < 0.8 and c.B < 0.35
@@ -1325,20 +1324,57 @@ do
         end
     end
 
-    local function lockTile(tile, btn)
-        if isLockedTile(tile, btn) then return "already" end
-        press(btn)
-        task.wait(0.8)
-        if not btn:IsDescendantOf(PlayerGui) then return "unknown" end
-        if isLockedTile(tile, btn) then return "locked" end
-        -- ตรวจไม่เห็นว่าล็อกติด: กดกลับเพื่อคืนสถานะเดิม แล้วหยุดระบบ
-        press(btn)
-        task.wait(0.8)
-        return "failed"
+    -- นับการ์ด PRISM/HOLO ทั้งหมดในรายการ แยกเป็นล็อกแล้ว / ยังไม่ล็อก
+    -- ใช้จำนวนรวมตรวจผล เพราะเกมสร้างรายการการ์ดใหม่ทุกครั้งที่กดล็อก (ปุ่มเดิมหายไป)
+    local function scanTargets(list)
+        local unlocked, lockedN = {}, 0
+        for _, tile in ipairs(list:GetChildren()) do
+            if tile:IsA("GuiObject") and tile.Visible and isTargetTile(tile) then
+                local btn = findLockButton(tile)
+                if btn then
+                    if isLockedTile(tile, btn) then
+                        lockedN += 1
+                    else
+                        unlocked[#unlocked + 1] = { tile = tile, btn = btn }
+                    end
+                end
+            end
+        end
+        return unlocked, lockedN
+    end
+
+    local function tileName(tile)
+        local t = textsOf(tile)
+        for _, x in ipairs(t) do
+            if x.up:find("%(") then return x.text end
+        end
+        return t[1] and t[1].text or tile.Name
+    end
+
+    -- กดล็อก 1 ใบ แล้วรอดูผลสูงสุด 4 วินาที (server อาจตอบช้า)
+    local function lockOne(list, target, lockedBefore, unlockedBefore)
+        local name = tileName(target.tile)
+        press(target.btn)
+        for _ = 1, 8 do
+            task.wait(0.5)
+            local current = inventoryList() or list
+            local unlocked, lockedN = scanTargets(current)
+            if lockedN > lockedBefore and #unlocked < unlockedBefore then
+                return "locked", name
+            end
+        end
+        -- จำนวนไม่เปลี่ยน: ถ้าปุ่มเดิมยังอยู่ ให้กดกลับเพื่อคืนสถานะเดิม
+        if target.btn:IsDescendantOf(PlayerGui) then
+            press(target.btn)
+            task.wait(0.8)
+            return "failed", name
+        end
+        return "unknown", name
     end
 
     task.spawn(function()
         while gui.Parent do
+            local waitTime = 2
             if settings.autoLock then
                 lockBroken = false -- ผู้ใช้เปิดใหม่เอง ให้ลองอีกครั้ง
                 local ok, err = pcall(function()
@@ -1347,32 +1383,26 @@ do
                         lockStatus = string.format("รอเปิดหน้า Inventory · ล็อกแล้ว %d ใบ", lockDone)
                         return
                     end
-                    for _, tile in ipairs(list:GetChildren()) do
-                        if not settings.autoLock or lockBroken then break end
-                        if tile:IsA("GuiObject") and tile.Visible and not checkedTiles[tile] and isTargetTile(tile) then
-                            local btn = findLockButton(tile)
-                            if btn then
-                                local result = lockTile(tile, btn)
-                                if result == "already" then
-                                    lockAlready += 1
-                                    checkedTiles[tile] = true
-                                elseif result == "locked" then
-                                    lockDone += 1
-                                    checkedTiles[tile] = true
-                                    print("[Anti AFK] ล็อกการ์ดแล้ว: " .. (textsOf(tile)[1] and textsOf(tile)[1].text or tile.Name))
-                                else
-                                    lockBroken = true
-                                    forceOff("autoLock")
-                                    lockStatus = "ตรวจสถานะล็อกไม่ได้ · ปิด Auto Lock แล้ว"
-                                    warn("[Anti AFK] Auto Lock: ตรวจสถานะล็อกหลังกดไม่ได้ (" .. result .. ") หยุดระบบเพื่อความปลอดภัย")
-                                    notify("Auto Lock หยุดทำงาน กรุณาเช็กการ์ดเอง")
-                                    return
-                                end
-                                refresh()
-                            end
-                        end
+                    local unlocked, lockedN = scanTargets(list)
+                    if #unlocked == 0 then
+                        lockStatus = string.format("ครบแล้ว · ล็อกอยู่ %d ใบ (รอบนี้ล็อก %d ใบ)", lockedN, lockDone)
+                        return
                     end
-                    lockStatus = string.format("ล็อกแล้ว %d ใบ · ล็อกอยู่แล้ว %d ใบ", lockDone, lockAlready)
+
+                    lockStatus = string.format("กำลังล็อก · เหลือ %d ใบ", #unlocked)
+                    refresh()
+                    local result, name = lockOne(list, unlocked[1], lockedN, #unlocked)
+                    if result == "locked" then
+                        lockDone += 1
+                        print("[Anti AFK] ล็อกการ์ดแล้ว: " .. name)
+                        waitTime = 0.3 -- ทำใบถัดไปต่อเลย
+                    else
+                        lockBroken = true
+                        forceOff("autoLock")
+                        lockStatus = "ตรวจสถานะล็อกไม่ได้ · ปิด Auto Lock แล้ว"
+                        warn(string.format("[Anti AFK] Auto Lock: กดล็อก %s แล้วจำนวนที่ล็อกไม่เพิ่ม (%s) หยุดระบบเพื่อความปลอดภัย", name, result))
+                        notify("Auto Lock หยุดทำงาน กรุณาเช็กการ์ด " .. name)
+                    end
                 end)
                 if not ok then
                     lockStatus = "error: " .. tostring(err):sub(1, 60)
@@ -1381,7 +1411,7 @@ do
                 lockStatus = "ปิดอยู่"
             end
             refresh()
-            task.wait(2)
+            task.wait(waitTime)
         end
     end)
 
