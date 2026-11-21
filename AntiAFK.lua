@@ -29,7 +29,7 @@ local function notify(text)
     end)
 end
 
-local SCRIPT_VERSION = "v3.4"
+local SCRIPT_VERSION = "v3.5"
 
 -- กันรันซ้ำ: บอกเวอร์ชันที่รันอยู่ และเตือนถ้าโค้ดบน GitHub ใหม่กว่า
 if env.__AntiAFK_Loaded then
@@ -86,7 +86,8 @@ local LOCK_TAGS = { "PRISM", "HOLO" }
 local FUSE_MEMBERS = { "RUKA", "PHARITA", "ASA", "AHYEON", "RAMI", "RORA", "CHIQUITA" }
 local FUSE_SLOTS = 6
 local FUSE_KEEP_ONE = false         -- true = ใช้เฉพาะการ์ดที่มี x2 ขึ้นไป (เก็บไว้อย่างน้อย 1 ใบ)
-local FUSE_DELAY = 4                -- วินาทีระหว่างการ Fuse แต่ละครั้ง
+local FUSE_DELAY = 4                -- วินาทีที่รอก่อนลองใหม่ เมื่อ Fuse ไม่สำเร็จ
+local FUSE_ALLOW_SPECIAL = true     -- true = ใช้การ์ด SHINY / PRISM / HOLO ใน Fuse ได้ (ใช้ใบธรรมดาก่อนถ้าจำนวนเท่ากัน)
 
 -- ตั้งค่า AFK Buy: ถ้าไม่ได้ขยับนานเกินเวลานี้ จะเปิด AFK MODE ให้ และตั้งให้ซื้อแพ็คท้ายๆ
 local AFK_BUY_IDLE = 300            -- วินาที (5 นาที)
@@ -1492,17 +1493,17 @@ do
                 local name, count, special = nil, 1, false
                 local texts = textsOf(tile)
                 for _, t in ipairs(texts) do
-                    -- เทียบเฉพาะตัวอักษร เช่น "✨ Ruka" -> RUKA
-                    local letters = t.up:gsub("[^A-Z]", "")
+                    -- ตัดวงเล็บและสัญลักษณ์ออก เช่น "Pharita (Shiny)" -> PHARITA
+                    local letters = t.up:gsub("%b()", ""):gsub("[^A-Z]", "")
                     if memberSet[letters] then name = letters end
                     local c = t.up:match("^X%s*(%d+)$")
                     if c then count = tonumber(c) end
-                    -- ไม่ใช้การ์ดพิเศษ (PRISM, HOLO, SHINY)
+                    -- การ์ดพิเศษ (PRISM, HOLO, SHINY)
                     if t.up:find("PRISM") or t.up:find("HOLO") or t.up:find("SHINY") then special = true end
                 end
-                if name and not special then
+                if name and (FUSE_ALLOW_SPECIAL or not special) then
                     if not FUSE_KEEP_ONE or count >= 2 then
-                        cards[#cards + 1] = { tile = tile, name = name, count = count }
+                        cards[#cards + 1] = { tile = tile, name = name, count = count, special = special }
                     end
                 elseif not name and #texts > 0 then
                     unknown[#unknown + 1] = texts[1].text
@@ -1520,7 +1521,7 @@ do
         for _, t in ipairs(textsOf(root)) do
             if not t.inst:IsDescendantOf(list) and shown(t.inst) then
                 local y = t.inst.AbsolutePosition.Y
-                local letters = t.up:gsub("[^A-Z]", "")
+                local letters = t.up:gsub("%b()", ""):gsub("[^A-Z]", "")
                 if y > top and y < bottom and memberSet[letters] then
                     names[#names + 1] = letters
                 end
@@ -1539,7 +1540,10 @@ do
 
         local have = {}
         for _, n in ipairs(inSlots) do have[n] = true end
-        table.sort(cards, function(a, b) return a.count > b.count end)
+        table.sort(cards, function(a, b)
+            if a.count ~= b.count then return a.count > b.count end
+            return (not a.special) and b.special
+        end)
         -- คนที่ยังไม่มีในช่องมาก่อน แล้วค่อยเป็นธีมอื่นของคนที่มีแล้ว
         local order = {}
         for _, c in ipairs(cards) do if not have[c.name] then order[#order + 1] = c end end
@@ -1552,15 +1556,15 @@ do
                 local before = #inSlots
                 press(c.tile)
                 local after = before
-                for _ = 1, 6 do
-                    task.wait(0.35)
+                for _ = 1, 15 do
+                    task.wait(0.1)
                     after = #readSlots(root, fuseBtn, list)
                     if after ~= before then break end
                 end
                 if after > before then
                     inSlots = readSlots(root, fuseBtn, list)
                 else
-                    if after < before then press(c.tile) task.wait(0.5) end -- กดแล้วการ์ดออกจากช่อง ให้ใส่กลับ
+                    if after < before then press(c.tile) task.wait(0.3) end -- กดแล้วการ์ดออกจากช่อง ให้ใส่กลับ
                     failedTiles[c.tile] = true
                     failedNames[#failedNames + 1] = c.name .. " x" .. c.count
                     warn("[Anti AFK] Fuse: กดการ์ด " .. c.name .. " x" .. c.count .. " แล้วไม่เข้าช่อง")
@@ -1610,13 +1614,13 @@ do
 
     local function claimReward(fuseBtn)
         local claimed = 0
-        for _ = 1, 16 do
-            task.wait(0.5)
+        for _ = 1, 30 do
+            task.wait(0.2)
             local target = findClaim(fuseBtn)
             if target then
                 press(target)
                 claimed += 1
-                task.wait(0.8)
+                task.wait(0.4)
             elseif claimed > 0 then
                 break
             end
@@ -1683,7 +1687,7 @@ do
 
                     -- กดรับรางวัลหลัง Fuse
                     local claimed = claimReward(fuseBtn)
-                    task.wait(1)
+                    task.wait(0.3)
 
                     local root2, title2 = findFusion()
                     local btn2 = root2 and findFuseButton(root2, title2)
@@ -1694,7 +1698,7 @@ do
                         failedTiles = setmetatable({}, { __mode = "k" })
                         fuseStatus = string.format("Fuse สำเร็จ %d ครั้ง · ทำต่อ...", fuseDone)
                         print(string.format("[Anti AFK] Fuse สำเร็จ: %s (กดรับ %d ครั้ง)", table.concat(names, " + "), claimed))
-                        waitTime = 0.5 -- ผสมต่อทันที
+                        waitTime = 0.1 -- ผสมต่อทันที
                     else
                         fuseFails += 1
                         fuseStatus = string.format("Fuse ไม่สำเร็จ (%d/3)", fuseFails)
