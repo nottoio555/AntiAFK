@@ -29,7 +29,7 @@ local function notify(text)
     end)
 end
 
-local SCRIPT_VERSION = "v2"
+local SCRIPT_VERSION = "v3"
 
 -- กันรันซ้ำ: บอกเวอร์ชันที่รันอยู่ และเตือนถ้าโค้ดบน GitHub ใหม่กว่า
 if env.__AntiAFK_Loaded then
@@ -53,6 +53,39 @@ local loadingStatus = "กำลังตรวจหน้าโหลด..."
 local eventStatus = "กำลังเริ่ม"
 local rebirthStatus = "กำลังอ่านค่า..."
 local webhookStatus = "กำลังเริ่ม"
+local lockStatus = "ปิดอยู่"
+local fuseStatus = "ปิดอยู่"
+
+-- ค่าเปิด/ปิดของปุ่ม Toggle (จำไว้ในไฟล์ จะได้ใช้ค่าเดิมหลัง rejoin)
+local SETTINGS_FILE = "AntiAFK_Settings.json"
+local settings = { autoLock = false, autoFuse = false }
+do
+    local Http = game:GetService("HttpService")
+    pcall(function()
+        if isfile and readfile and isfile(SETTINGS_FILE) then
+            local saved = Http:JSONDecode(readfile(SETTINGS_FILE))
+            for k, v in pairs(saved) do
+                if settings[k] ~= nil and type(v) == type(settings[k]) then settings[k] = v end
+            end
+        end
+    end)
+end
+local function saveSettings()
+    pcall(function()
+        if writefile then
+            writefile(SETTINGS_FILE, game:GetService("HttpService"):JSONEncode(settings))
+        end
+    end)
+end
+
+-- ตั้งค่า Auto Lock: ล็อกการ์ดที่ชื่อหรือป้ายมีคำเหล่านี้
+local LOCK_TAGS = { "PRISM", "HOLO" }
+
+-- ตั้งค่า Auto Fuse: ใช้การ์ด 6 ใบที่ชื่อไม่ซ้ำกัน จากรายชื่อนี้
+local FUSE_MEMBERS = { "RUKA", "PHARITA", "ASA", "AHYEON", "RAMI", "RORA", "CHIQUITA" }
+local FUSE_SLOTS = 6
+local FUSE_KEEP_ONE = true          -- true = ใช้เฉพาะการ์ดที่มี x2 ขึ้นไป (เก็บไว้อย่างน้อย 1 ใบ)
+local FUSE_DELAY = 4                -- วินาทีระหว่างการ Fuse แต่ละครั้ง
 
 -- ตั้งค่า Discord Webhook แจ้งเตือนการ์ด
 -- ตั้ง URL ก่อนรัน loadstring ด้วย getgenv().AntiAFK_Webhook = "https://discord.com/api/webhooks/..."
@@ -181,12 +214,58 @@ local body = make("Frame", {
 make("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, body)
 
 local rows = {}
-local function addRow(key, icon, title, order)
+local toggleRenders = {}
+local TweenService = game:GetService("TweenService")
+
+-- ปิด Toggle จากโค้ด (ใช้ตอนระบบหยุดตัวเองเพราะเจอปัญหา)
+local function forceOff(settingKey)
+    settings[settingKey] = false
+    saveSettings()
+    if toggleRenders[settingKey] then toggleRenders[settingKey](true) end
+end
+
+-- ปุ่ม Toggle แบบสวิตช์ เปลี่ยนค่า settings[settingKey] และบันทึกลงไฟล์
+local function addToggle(card, settingKey, onChange)
+    local track = make("TextButton", {
+        Text = "", AutoButtonColor = false, BorderSizePixel = 0,
+        Size = UDim2.fromOffset(38, 20), Position = UDim2.new(1, -46, 0.5, -10),
+    }, card)
+    corner(track, 10)
+    local knob = make("Frame", {
+        Size = UDim2.fromOffset(16, 16), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+    }, track)
+    corner(knob, 8)
+
+    local function render(animate)
+        local on = settings[settingKey]
+        local goalPos = on and UDim2.fromOffset(20, 2) or UDim2.fromOffset(2, 2)
+        local goalColor = on and THEME.ok or Color3.fromRGB(70, 70, 90)
+        if animate then
+            TweenService:Create(knob, TweenInfo.new(0.15), { Position = goalPos }):Play()
+            TweenService:Create(track, TweenInfo.new(0.15), { BackgroundColor3 = goalColor }):Play()
+        else
+            knob.Position, track.BackgroundColor3 = goalPos, goalColor
+        end
+    end
+    render(false)
+
+    toggleRenders[settingKey] = render
+    track.MouseButton1Click:Connect(function()
+        settings[settingKey] = not settings[settingKey]
+        saveSettings()
+        render(true)
+        if onChange then onChange(settings[settingKey]) end
+    end)
+end
+
+local function addRow(key, icon, title, order, toggleKey, onToggle)
     local card = make("Frame", {
         Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = THEME.card,
         BorderSizePixel = 0, LayoutOrder = order,
     }, body)
     corner(card, 8)
+    local textWidth = toggleKey and -100 or -52
+    if toggleKey then addToggle(card, toggleKey, onToggle) end
     local bar = make("Frame", {
         Size = UDim2.new(0, 3, 1, -16), Position = UDim2.new(0, 6, 0, 8),
         BackgroundColor3 = THEME.ok, BorderSizePixel = 0,
@@ -198,12 +277,12 @@ local function addRow(key, icon, title, order)
     }, card)
     make("TextLabel", {
         Text = title, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = THEME.text,
-        BackgroundTransparency = 1, Position = UDim2.fromOffset(46, 6), Size = UDim2.new(1, -52, 0, 14),
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(46, 6), Size = UDim2.new(1, textWidth, 0, 14),
         TextXAlignment = Enum.TextXAlignment.Left,
     }, card)
     local value = make("TextLabel", {
         Text = "-", Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = THEME.sub,
-        BackgroundTransparency = 1, Position = UDim2.fromOffset(46, 22), Size = UDim2.new(1, -52, 0, 14),
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(46, 22), Size = UDim2.new(1, textWidth, 0, 14),
         TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
     }, card)
     rows[key] = { bar = bar, value = value }
@@ -216,6 +295,12 @@ addRow("event", "🎰", "Lottery " .. SCRIPT_VERSION
     .. (EVENT_FIXED_NUMBER and " · เลขคงที่" or " · สุ่มเลข 00-99"), 4)
 addRow("rebirth", "⭐", "Rebirth", 5)
 addRow("webhook", "📨", "Discord Webhook", 6)
+addRow("lock", "🔒", "Auto Lock PRISM / HOLO", 7, "autoLock", function(on)
+    lockStatus = on and "เปิดอยู่ · เปิดหน้า Inventory ค้างไว้" or "ปิดอยู่"
+end)
+addRow("fuse", "🧬", "Auto Fuse", 8, "autoFuse", function(on)
+    fuseStatus = on and "เปิดอยู่ · เปิดหน้า Fusion ค้างไว้" or "ปิดอยู่"
+end)
 
 -- ย่อ/ขยาย
 local collapsed = false
@@ -276,6 +361,8 @@ local function refresh()
     setRow("event", eventStatus)
     setRow("rebirth", rebirthStatus)
     setRow("webhook", webhookStatus)
+    setRow("lock", lockStatus)
+    setRow("fuse", fuseStatus)
 end
 refresh()
 
@@ -1078,6 +1165,392 @@ if WEBHOOK_ENABLED then
             end
         end)
     end
+end
+
+-- ===== Auto Lock PRISM/HOLO และ Auto Fuse (กดปุ่มใน UI ของเกม) =====
+do
+    local VIM = game:GetService("VirtualInputManager")
+    local GuiService = game:GetService("GuiService")
+    local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+    local function shown(inst)
+        local cur = inst
+        while cur and cur ~= PlayerGui do
+            if cur:IsA("GuiObject") and not cur.Visible then return false end
+            if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+            cur = cur.Parent
+        end
+        return cur == PlayerGui
+    end
+
+    local function clean(txt)
+        return (txt:gsub("<[^>]->", ""):gsub("^%s+", ""):gsub("%s+$", ""))
+    end
+
+    local function textsOf(scope)
+        local list = {}
+        for _, d in ipairs(scope:GetDescendants()) do
+            if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Visible then
+                local tx = clean(d.Text)
+                if tx ~= "" then list[#list + 1] = { inst = d, text = tx, up = tx:upper() } end
+            end
+        end
+        return list
+    end
+
+    local function scrollIntoView(obj)
+        local sf = obj:FindFirstAncestorWhichIsA("ScrollingFrame")
+        if not sf then return end
+        local sp, ss = sf.AbsolutePosition, sf.AbsoluteSize
+        local op, os_ = obj.AbsolutePosition, obj.AbsoluteSize
+        local cx, cy = sf.CanvasPosition.X, sf.CanvasPosition.Y
+        if op.Y < sp.Y or op.Y + os_.Y > sp.Y + ss.Y then
+            cy = math.max(0, cy + (op.Y - sp.Y) - 8)
+        end
+        if op.X < sp.X or op.X + os_.X > sp.X + ss.X then
+            cx = math.max(0, cx + (op.X - sp.X) - 8)
+        end
+        if cx ~= sf.CanvasPosition.X or cy ~= sf.CanvasPosition.Y then
+            sf.CanvasPosition = Vector2.new(cx, cy)
+            task.wait(0.15)
+        end
+    end
+
+    -- กดปุ่ม: ยิง connection ของปุ่มก่อน (ยิงสัญญาณเดียว กันกดซ้ำ 2 ครั้ง) ถ้าไม่ได้ค่อยคลิกเมาส์จำลอง
+    local function press(obj)
+        local btn = obj
+        if not btn:IsA("GuiButton") then
+            btn = nil
+            for _, d in ipairs(obj:GetDescendants()) do
+                if d:IsA("GuiButton") then btn = d break end
+            end
+        end
+        if btn and getconnections then
+            for _, sig in ipairs({ btn.MouseButton1Click, btn.Activated }) do
+                local ok, conns = pcall(getconnections, sig)
+                if ok and conns and #conns > 0 then
+                    local fired = false
+                    for _, c in ipairs(conns) do
+                        if pcall(function() c:Fire() end) then fired = true end
+                    end
+                    if fired then return end
+                end
+            end
+        end
+        local target = btn or obj
+        scrollIntoView(target)
+        local p, s = target.AbsolutePosition, target.AbsoluteSize
+        local x, y = p.X + s.X / 2, p.Y + s.Y / 2
+        local sg = target:FindFirstAncestorWhichIsA("ScreenGui")
+        if sg and not sg.IgnoreGuiInset then
+            local inset = GuiService:GetGuiInset()
+            x, y = x + inset.X, y + inset.Y
+        end
+        pcall(function()
+            VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+            task.wait(0.05)
+            VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+        end)
+    end
+
+    -- ---------- Auto Lock ----------
+    local lockBroken = false
+    local lockDone, lockAlready = 0, 0
+    local checkedTiles = setmetatable({}, { __mode = "k" })
+
+    local function isOrange(c)
+        return c.R > 0.75 and c.G > 0.3 and c.G < 0.8 and c.B < 0.35
+    end
+
+    -- ไอคอนล็อกของการ์ดที่ล็อกแล้วเป็นสีส้ม (ดูจากรูป Inventory)
+    local function lockLooksOn(btn)
+        local function check(o)
+            if o:IsA("GuiObject") and not o.Visible then return false end
+            if (o:IsA("ImageLabel") or o:IsA("ImageButton")) and o.Image ~= ""
+                and o.ImageTransparency < 0.5 and isOrange(o.ImageColor3) then return true end
+            if o:IsA("GuiObject") and o.BackgroundTransparency < 0.6 and isOrange(o.BackgroundColor3) then return true end
+            if o:IsA("UIStroke") and o.Enabled and o.Transparency < 0.6 and isOrange(o.Color) then return true end
+            if (o:IsA("TextLabel") or o:IsA("TextButton")) and o.Text ~= ""
+                and o.TextTransparency < 0.5 and isOrange(o.TextColor3) then return true end
+            return false
+        end
+        if check(btn) then return true end
+        for _, d in ipairs(btn:GetDescendants()) do
+            if check(d) then return true end
+        end
+        return false
+    end
+
+    local function isLockedTile(tile, btn)
+        for _, name in ipairs({ "Locked", "IsLocked", "locked" }) do
+            local v = tile:GetAttribute(name)
+            if v == nil then v = btn:GetAttribute(name) end
+            if type(v) == "boolean" then return v end
+        end
+        return lockLooksOn(btn)
+    end
+
+    local function isTargetTile(tile)
+        for _, t in ipairs(textsOf(tile)) do
+            for _, tag in ipairs(LOCK_TAGS) do
+                if t.up:find(tag, 1, true) then return true end
+            end
+        end
+        return false
+    end
+
+    -- ปุ่มล็อกอยู่มุมซ้ายบน (มุมขวาบนคือปุ่มขาย ห้ามกด)
+    local function findLockButton(tile)
+        for _, d in ipairs(tile:GetDescendants()) do
+            if d:IsA("GuiButton") and d.Name:lower():find("lock") then return d end
+        end
+        local tp, ts = tile.AbsolutePosition, tile.AbsoluteSize
+        for _, d in ipairs(tile:GetDescendants()) do
+            if d:IsA("GuiButton") then
+                local n = d.Name:lower()
+                if not (n:find("sell") or n:find("money") or n:find("coin") or n:find("equip")) then
+                    local cx = d.AbsolutePosition.X + d.AbsoluteSize.X / 2
+                    local cy = d.AbsolutePosition.Y + d.AbsoluteSize.Y / 2
+                    if cx < tp.X + ts.X * 0.35 and cy < tp.Y + ts.Y * 0.3 then return d end
+                end
+            end
+        end
+    end
+
+    local function inventoryList()
+        local inv = PlayerGui:FindFirstChild("InventoryGui")
+        if not inv then return nil end
+        for _, d in ipairs(inv:GetDescendants()) do
+            if d:IsA("ScrollingFrame") and shown(d) then return d end
+        end
+    end
+
+    local function lockTile(tile, btn)
+        if isLockedTile(tile, btn) then return "already" end
+        press(btn)
+        task.wait(0.8)
+        if not btn:IsDescendantOf(PlayerGui) then return "unknown" end
+        if isLockedTile(tile, btn) then return "locked" end
+        -- ตรวจไม่เห็นว่าล็อกติด: กดกลับเพื่อคืนสถานะเดิม แล้วหยุดระบบ
+        press(btn)
+        task.wait(0.8)
+        return "failed"
+    end
+
+    task.spawn(function()
+        while gui.Parent do
+            if settings.autoLock then
+                lockBroken = false -- ผู้ใช้เปิดใหม่เอง ให้ลองอีกครั้ง
+                local ok, err = pcall(function()
+                    local list = inventoryList()
+                    if not list then
+                        lockStatus = string.format("รอเปิดหน้า Inventory · ล็อกแล้ว %d ใบ", lockDone)
+                        return
+                    end
+                    for _, tile in ipairs(list:GetChildren()) do
+                        if not settings.autoLock or lockBroken then break end
+                        if tile:IsA("GuiObject") and tile.Visible and not checkedTiles[tile] and isTargetTile(tile) then
+                            local btn = findLockButton(tile)
+                            if btn then
+                                local result = lockTile(tile, btn)
+                                if result == "already" then
+                                    lockAlready += 1
+                                    checkedTiles[tile] = true
+                                elseif result == "locked" then
+                                    lockDone += 1
+                                    checkedTiles[tile] = true
+                                    print("[Anti AFK] ล็อกการ์ดแล้ว: " .. (textsOf(tile)[1] and textsOf(tile)[1].text or tile.Name))
+                                else
+                                    lockBroken = true
+                                    forceOff("autoLock")
+                                    lockStatus = "ตรวจสถานะล็อกไม่ได้ · ปิด Auto Lock แล้ว"
+                                    warn("[Anti AFK] Auto Lock: ตรวจสถานะล็อกหลังกดไม่ได้ (" .. result .. ") หยุดระบบเพื่อความปลอดภัย")
+                                    notify("Auto Lock หยุดทำงาน กรุณาเช็กการ์ดเอง")
+                                    return
+                                end
+                                refresh()
+                            end
+                        end
+                    end
+                    lockStatus = string.format("ล็อกแล้ว %d ใบ · ล็อกอยู่แล้ว %d ใบ", lockDone, lockAlready)
+                end)
+                if not ok then
+                    lockStatus = "error: " .. tostring(err):sub(1, 60)
+                end
+            elseif not lockBroken then
+                lockStatus = "ปิดอยู่"
+            end
+            refresh()
+            task.wait(2)
+        end
+    end)
+
+    -- ---------- Auto Fuse ----------
+    local SUFFIX = { K = 1e3, M = 1e6, B = 1e9, T = 1e12, QA = 1e15, QI = 1e18 }
+    local function parseNumber(s)
+        s = s:gsub("[%$%+,%s]", "")
+        local num, suf = s:match("^(%d+%.?%d*)(%a*)$")
+        if not num then return nil end
+        local mult = (suf == "") and 1 or SUFFIX[suf:upper()]
+        return mult and tonumber(num) * mult
+    end
+
+    local memberSet = {}
+    for _, m in ipairs(FUSE_MEMBERS) do memberSet[m] = true end
+
+    local function findFusion()
+        for _, sg in ipairs(PlayerGui:GetChildren()) do
+            if sg:IsA("ScreenGui") and sg.Enabled then
+                for _, t in ipairs(textsOf(sg)) do
+                    if t.up == "FUSION REACTOR" and shown(t.inst) then
+                        return sg, t.inst
+                    end
+                end
+            end
+        end
+    end
+
+    -- ปุ่ม Fuse ตรงกลาง: ข้อความขึ้นต้นด้วย FUSION และอยู่ต่ำกว่าหัวข้อ (แท็บ FUSION อยู่ด้านบน)
+    local function findFuseButton(root, titleLabel)
+        local titleY = titleLabel.AbsolutePosition.Y
+        for _, t in ipairs(textsOf(root)) do
+            if t.up:match("^FUSION") and t.up ~= "FUSION REACTOR" and shown(t.inst)
+                and t.inst.AbsolutePosition.Y > titleY + 20 then
+                local cost = t.text:match("([%d%.]+%s*%a*)%s*$")
+                if not cost or not parseNumber(cost) then
+                    -- ราคาอาจอยู่ใน label แยก ใต้คำว่า FUSION
+                    local parent = t.inst.Parent
+                    for _, s in ipairs(textsOf(parent)) do
+                        if s.inst ~= t.inst and parseNumber(s.text) then cost = s.text break end
+                    end
+                end
+                return t.inst, cost and parseNumber(cost)
+            end
+        end
+    end
+
+    local function readCards(root, fuseBtn)
+        local list
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("ScrollingFrame") and shown(d) and d.AbsolutePosition.Y > fuseBtn.AbsolutePosition.Y then
+                list = d
+                break
+            end
+        end
+        if not list then return nil end
+        local best = {}
+        for _, tile in ipairs(list:GetChildren()) do
+            if tile:IsA("GuiObject") and tile.Visible then
+                local name, count, skip = nil, 1, false
+                for _, t in ipairs(textsOf(tile)) do
+                    local n = t.up:gsub("%s+", "")
+                    if memberSet[n] then name = n end
+                    local c = t.up:match("^X(%d+)$")
+                    if c then count = tonumber(c) end
+                    -- ไม่ใช้การ์ดพิเศษ (PRISM, HOLO, SHINY หรือชื่อที่มีวงเล็บ)
+                    if t.up:find("PRISM") or t.up:find("HOLO") or t.up:find("SHINY") or t.up:find("%(") then
+                        skip = true
+                    end
+                end
+                if name and not skip and (not FUSE_KEEP_ONE or count >= 2) then
+                    if not best[name] or count > best[name].count then
+                        best[name] = { tile = tile, count = count }
+                    end
+                end
+            end
+        end
+        return best
+    end
+
+    local function readMoney()
+        local hud = PlayerGui:FindFirstChild("HUD_MoneyBar")
+        local amount = hud and hud:FindFirstChild("Amount", true)
+        return amount and amount:IsA("TextLabel") and parseNumber(clean(amount.Text))
+    end
+
+    local function totalCount(best)
+        local n = 0
+        for _, v in pairs(best) do n += v.count end
+        return n
+    end
+
+    local fuseDone, fuseFails = 0, 0
+    task.spawn(function()
+        while gui.Parent do
+            if settings.autoFuse then
+                if fuseFails >= 3 then fuseFails = 0 end -- ผู้ใช้เปิดใหม่เอง
+                local ok, err = pcall(function()
+                    local root, title = findFusion()
+                    if not root then
+                        fuseStatus = string.format("รอเปิดหน้า Fusion · Fuse แล้ว %d ครั้ง", fuseDone)
+                        return
+                    end
+                    local fuseBtn, cost = findFuseButton(root, title)
+                    if not fuseBtn then
+                        fuseStatus = "ไม่พบปุ่ม FUSION"
+                        return
+                    end
+                    local best = readCards(root, fuseBtn)
+                    if not best then
+                        fuseStatus = "ไม่พบรายการการ์ด"
+                        return
+                    end
+
+                    local pool = {}
+                    for name, v in pairs(best) do pool[#pool + 1] = { name = name, tile = v.tile, count = v.count } end
+                    if #pool < FUSE_SLOTS then
+                        fuseStatus = string.format("การ์ดไม่พอ (มี %d/%d แบบ) · Fuse แล้ว %d ครั้ง", #pool, FUSE_SLOTS, fuseDone)
+                        return
+                    end
+                    local money = readMoney()
+                    if cost and money and money < cost then
+                        fuseStatus = "เงินไม่พอ Fuse · Fuse แล้ว " .. fuseDone .. " ครั้ง"
+                        return
+                    end
+
+                    -- ใช้ใบที่มีจำนวนมากที่สุดก่อน
+                    table.sort(pool, function(a, b) return a.count > b.count end)
+                    local names = {}
+                    fuseStatus = "กำลังใส่การ์ด..."
+                    refresh()
+                    for i = 1, FUSE_SLOTS do
+                        press(pool[i].tile)
+                        names[#names + 1] = pool[i].name
+                        task.wait(0.5)
+                    end
+                    local before = totalCount(best)
+                    press(fuseBtn)
+                    fuseStatus = "กำลัง Fuse..."
+                    refresh()
+                    task.wait(FUSE_DELAY)
+
+                    local after = readCards(root, fuseBtn)
+                    if after and totalCount(after) < before then
+                        fuseDone += 1
+                        fuseFails = 0
+                        fuseStatus = string.format("Fuse สำเร็จ %d ครั้ง", fuseDone)
+                        print("[Anti AFK] Fuse สำเร็จ: " .. table.concat(names, " + "))
+                    else
+                        fuseFails += 1
+                        fuseStatus = string.format("Fuse ไม่สำเร็จ (%d/3)", fuseFails)
+                        warn("[Anti AFK] Fuse: จำนวนการ์ดไม่ลดลงหลังกด FUSION")
+                        if fuseFails >= 3 then
+                            forceOff("autoFuse")
+                            fuseStatus = "Fuse ไม่สำเร็จ 3 ครั้ง · ปิด Auto Fuse แล้ว"
+                            notify("Auto Fuse หยุดทำงาน")
+                        end
+                    end
+                end)
+                if not ok then
+                    fuseStatus = "error: " .. tostring(err):sub(1, 60)
+                end
+            else
+                if fuseStatus:find("3 ครั้ง") == nil then fuseStatus = "ปิดอยู่" end
+            end
+            refresh()
+            task.wait(1)
+        end
+    end)
 end
 
 notify("เปิดใช้งานแล้ว")
