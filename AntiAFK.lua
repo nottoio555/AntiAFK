@@ -29,22 +29,71 @@ local function notify(text)
     end)
 end
 
-local SCRIPT_VERSION = "v3.7"
+local SCRIPT_VERSION = "v3.8"
 
--- กันรันซ้ำ: บอกเวอร์ชันที่รันอยู่ และเตือนถ้าโค้ดบน GitHub ใหม่กว่า
+-- รันซ้ำในเกม: ปิดเซสชันเก่าก่อน แล้วเริ่มใหม่ (ไม่ต้อง rejoin)
+-- ทุกลูปของสคริปต์ทำงานตราบที่กล่องสถานะยังอยู่ ลบกล่องเก่าทิ้ง = ลูปเก่าหยุดเอง
 if env.__AntiAFK_Loaded then
     local running = env.__AntiAFK_Version or "v1"
-    if running ~= SCRIPT_VERSION then
-        notify(string.format("กำลังรัน %s อยู่ มี %s แล้ว กรุณา rejoin", running, SCRIPT_VERSION))
-        print(string.format("[Anti AFK] กำลังรัน %s อยู่ มีเวอร์ชันใหม่ %s ให้ rejoin แล้วรันใหม่", running, SCRIPT_VERSION))
-    else
-        notify("ทำงานอยู่แล้ว (" .. running .. ")")
-        print("[Anti AFK] ทำงานอยู่แล้ว (" .. running .. ") ไม่ต้องรันซ้ำ")
+    pcall(function()
+        if env.__AntiAFK_Cleanup then env.__AntiAFK_Cleanup() end
+    end)
+    pcall(function()
+        if env.__AntiAFK_Conn then env.__AntiAFK_Conn:Disconnect() end
+    end)
+    -- เวอร์ชันเก่าที่ยังไม่มี Cleanup: หากล่องสถานะเก่าแล้วลบทิ้ง
+    local parents = {}
+    pcall(function() if gethui then parents[#parents + 1] = gethui() end end)
+    pcall(function() parents[#parents + 1] = game:GetService("CoreGui") end)
+    pcall(function() parents[#parents + 1] = LocalPlayer:FindFirstChild("PlayerGui") end)
+    for _, parent in ipairs(parents) do
+        pcall(function()
+            for _, child in ipairs(parent:GetChildren()) do
+                if child.Name == "AntiAFKStatus" then child:Destroy() end
+            end
+        end)
     end
-    return
+    print(string.format("[Anti AFK] ปิดเซสชันเก่า (%s) แล้ว เริ่ม %s ใหม่", running, SCRIPT_VERSION))
+    notify(string.format("ปิดเซสชันเก่า (%s) · เริ่ม %s", running, SCRIPT_VERSION))
+    task.wait(1.5) -- ให้ลูปเก่าเห็นว่ากล่องหายแล้วหยุดก่อน
 end
 env.__AntiAFK_Loaded = true
 env.__AntiAFK_Version = SCRIPT_VERSION
+
+-- connection ของเซสชันนี้ จะถูกตัดตอนรันซ้ำ
+local sessionConns = {}
+local function trackConn(conn)
+    sessionConns[#sessionConns + 1] = conn
+    return conn
+end
+
+-- URL Discord Webhook: จาก getgenv ก่อน ถ้าไม่มีอ่านจากไฟล์
+-- เมื่อเจอแล้วบันทึกลงไฟล์ไว้ เพื่อให้ใช้ได้ต่อหลังย้ายเซิร์ฟเวอร์ (getgenv ถูกล้างตอนย้าย)
+local WEBHOOK_FILE = "AntiAFK_Webhook.txt"
+local function isWebhook(u)
+    return type(u) == "string" and (u:match("^https://discord%.com/api/webhooks/")
+        or u:match("^https://discordapp%.com/api/webhooks/")) ~= nil
+end
+local WEBHOOK_URL = env.AntiAFK_Webhook
+if type(WEBHOOK_URL) == "string" then WEBHOOK_URL = WEBHOOK_URL:gsub("%s+", "") end
+if not isWebhook(WEBHOOK_URL) then
+    WEBHOOK_URL = nil
+    pcall(function()
+        if isfile and readfile and isfile(WEBHOOK_FILE) then
+            local saved = readfile(WEBHOOK_FILE):gsub("%s+", "")
+            if isWebhook(saved) then WEBHOOK_URL = saved end
+        end
+    end)
+end
+if WEBHOOK_URL then
+    env.AntiAFK_Webhook = WEBHOOK_URL
+    pcall(function()
+        if writefile and (not (isfile and readfile and isfile(WEBHOOK_FILE))
+            or readfile(WEBHOOK_FILE):gsub("%s+", "") ~= WEBHOOK_URL) then
+            writefile(WEBHOOK_FILE, WEBHOOK_URL)
+        end
+    end)
+end
 
 local startTime = os.clock()
 local kickBlocked = 0
@@ -152,6 +201,15 @@ pcall(function()
     if syn and syn.protect_gui then syn.protect_gui(gui) end
 end)
 gui.Parent = getGuiParent()
+
+-- ให้การรันครั้งถัดไปปิดเซสชันนี้ได้
+env.__AntiAFK_Cleanup = function()
+    for _, c in ipairs(sessionConns) do
+        pcall(function() c:Disconnect() end)
+    end
+    table.clear(sessionConns)
+    pcall(function() gui:Destroy() end)
+end
 
 local THEME = {
     bg = Color3.fromRGB(16, 16, 24),
@@ -346,14 +404,14 @@ do
             end)
         end
     end)
-    UserInputService.InputChanged:Connect(function(input)
+    trackConn(UserInputService.InputChanged:Connect(function(input)
         if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
             or input.UserInputType == Enum.UserInputType.Touch) then
             local d = input.Position - dragStart
             main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
                 startPos.Y.Scale, startPos.Y.Offset + d.Y)
         end
-    end)
+    end))
 end
 
 local function fmt(sec)
@@ -543,7 +601,13 @@ if AUTO_RECONNECT then
         or (syn and syn.queue_on_teleport)
         or (fluxus and fluxus.queue_on_teleport)
     if queue then
-        pcall(queue, string.format("loadstring(game:HttpGet(%q))()", SCRIPT_URL))
+        -- ส่ง URL webhook ไปด้วย เพราะ getgenv ถูกล้างตอนย้ายเซิร์ฟเวอร์
+        local code = ""
+        if WEBHOOK_URL then
+            code = string.format("getgenv().AntiAFK_Webhook = %q\n", WEBHOOK_URL)
+        end
+        code = code .. string.format("loadstring(game:HttpGet(%q))()", SCRIPT_URL)
+        pcall(queue, code)
     end
 
     local function setStatus(text)
@@ -552,12 +616,12 @@ if AUTO_RECONNECT then
     end
 
     local function rejoin(reason)
-        if rejoining then return end
+        if rejoining or not gui.Parent then return end -- เซสชันนี้ถูกปิดไปแล้ว
         rejoining = true
         print("[Anti AFK] หลุดจากเซิร์ฟเวอร์: " .. tostring(reason))
 
         task.spawn(function()
-            while retries < MAX_RETRIES do
+            while retries < MAX_RETRIES and gui.Parent do
                 retries += 1
                 setStatus(string.format("กำลังเชื่อมต่อใหม่ (%d/%d)", retries, MAX_RETRIES))
                 task.wait(RECONNECT_DELAY * retries)
@@ -582,9 +646,9 @@ if AUTO_RECONNECT then
     end
 
     -- ถ้า teleport ล้มเหลว ให้ลองใหม่
-    TeleportService.TeleportInitFailed:Connect(function(_, result, msg)
+    trackConn(TeleportService.TeleportInitFailed:Connect(function(_, result, msg)
         warn("[Anti AFK] TeleportInitFailed: " .. tostring(result) .. " " .. tostring(msg))
-    end)
+    end))
 
     -- ตรวจจับหน้าต่าง error ของ Roblox (เน็ตหลุด, ถูกตัดการเชื่อมต่อ)
     local function watchPrompt()
@@ -594,23 +658,23 @@ if AUTO_RECONNECT then
                 :WaitForChild("promptOverlay", 30)
         end)
         if ok and overlay then
-            overlay.ChildAdded:Connect(function(child)
+            trackConn(overlay.ChildAdded:Connect(function(child)
                 if child.Name == "ErrorPrompt" then
                     rejoin("ErrorPrompt")
                 end
-            end)
+            end))
         end
     end
     task.spawn(watchPrompt)
 
     -- ตัวสำรอง ใช้กรณีเข้าถึง CoreGui ไม่ได้
     pcall(function()
-        GuiService.ErrorMessageChanged:Connect(function()
+        trackConn(GuiService.ErrorMessageChanged:Connect(function()
             local msg = GuiService:GetErrorMessage()
             if msg and msg ~= "" then
                 rejoin(msg)
             end
-        end)
+        end))
     end)
 
     notify("Auto Reconnect เปิดอยู่")
@@ -930,15 +994,7 @@ if WEBHOOK_ENABLED then
     local MarketplaceService = game:GetService("MarketplaceService")
     local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
-    local url = env.AntiAFK_Webhook
-    if not url and readfile and isfile then
-        pcall(function()
-            if isfile("AntiAFK_Webhook.txt") then
-                url = readfile("AntiAFK_Webhook.txt")
-            end
-        end)
-    end
-    if url then url = url:gsub("%s+", "") end
+    local url = WEBHOOK_URL
 
     local httpRequest = request or http_request
         or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request)
@@ -1778,8 +1834,8 @@ do
         if os.clock() - lastSyntheticInput < 1 then return end
         if USER_INPUTS[input.UserInputType] then lastInput = os.clock() end
     end
-    UserInputService.InputBegan:Connect(onInput)
-    UserInputService.InputChanged:Connect(onInput)
+    trackConn(UserInputService.InputBegan:Connect(onInput))
+    trackConn(UserInputService.InputChanged:Connect(onInput))
 
     local Camera = workspace.CurrentCamera
 
@@ -1972,13 +2028,13 @@ do
 
     local hopping, hopStartedAt = false, 0
     local triedIds = {}
-    TeleportService.TeleportInitFailed:Connect(function(player, result, msg)
+    trackConn(TeleportService.TeleportInitFailed:Connect(function(player, result, msg)
         if player == LocalPlayer and hopping then
             hopping = false
             hopStatus = "ย้ายเซิร์ฟไม่สำเร็จ · ลองเซิร์ฟถัดไป"
             warn("[Anti AFK] Server Hop ล้มเหลว: " .. tostring(result) .. " " .. tostring(msg))
         end
-    end)
+    end))
 
     task.spawn(function()
         while gui.Parent do
