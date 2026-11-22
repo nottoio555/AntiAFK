@@ -29,7 +29,7 @@ local function notify(text)
     end)
 end
 
-local SCRIPT_VERSION = "v3.6"
+local SCRIPT_VERSION = "v3.7"
 
 -- กันรันซ้ำ: บอกเวอร์ชันที่รันอยู่ และเตือนถ้าโค้ดบน GitHub ใหม่กว่า
 if env.__AntiAFK_Loaded then
@@ -56,10 +56,11 @@ local webhookStatus = "กำลังเริ่ม"
 local lockStatus = "ปิดอยู่"
 local fuseStatus = "ปิดอยู่"
 local afkBuyStatus = "กำลังเริ่ม"
+local hopStatus = "กำลังเริ่ม"
 
 -- ค่าเปิด/ปิดของปุ่ม Toggle (จำไว้ในไฟล์ จะได้ใช้ค่าเดิมหลัง rejoin)
 local SETTINGS_FILE = "AntiAFK_Settings.json"
-local settings = { autoLock = false, autoFuse = false, afkBuy = true }
+local settings = { autoLock = false, autoFuse = false, afkBuy = true, serverHop = true }
 do
     local Http = game:GetService("HttpService")
     pcall(function()
@@ -92,6 +93,11 @@ local FUSE_ALLOW_SPECIAL = true     -- true = ใช้การ์ด SHINY / P
 -- ตั้งค่า AFK Buy: ถ้าไม่ได้ขยับนานเกินเวลานี้ จะเปิด AFK MODE ให้ และตั้งให้ซื้อแพ็คท้ายๆ
 local AFK_BUY_IDLE = 300            -- วินาที (5 นาที)
 local AFK_BUY_LAST = 4              -- จำนวนแพ็คท้ายรายการที่ต้องเป็น BUYING เสมอ
+
+-- ตั้งค่า Server Hop ก่อน Lottery: Lottery เริ่มเมื่อมีผู้เล่นอย่างน้อย 4 คน
+local HOP_MIN_PLAYERS = 4           -- จำนวนผู้เล่นขั้นต่ำ (นับตัวเองด้วย)
+local HOP_CHECK_MINUTE = 58         -- เช็กตอนนาทีนี้ (2 นาทีก่อน Lottery ที่นาที 00)
+local HOP_MAX_PER_HOUR = 3          -- ย้ายเซิร์ฟเวอร์ได้สูงสุดกี่ครั้งต่อรอบ กันย้ายวนไม่จบ
 
 -- จดเวลาที่สคริปต์คลิกเอง เพื่อไม่ให้นับเป็นการขยับของผู้ใช้
 local lastSyntheticInput = 0
@@ -316,6 +322,9 @@ end)
 addRow("afkbuy", "💤", "AFK Buy · ซื้อ " .. AFK_BUY_LAST .. " แพ็คท้าย", 9, "afkBuy", function(on)
     afkBuyStatus = on and "เปิดอยู่" or "ปิดอยู่"
 end)
+addRow("hop", "🌐", "Server Hop ก่อน Lottery", 10, "serverHop", function(on)
+    hopStatus = on and "เปิดอยู่" or "ปิดอยู่"
+end)
 
 -- ย่อ/ขยาย
 local collapsed = false
@@ -379,6 +388,7 @@ local function refresh()
     setRow("lock", lockStatus)
     setRow("fuse", fuseStatus)
     setRow("afkbuy", afkBuyStatus)
+    setRow("hop", hopStatus)
 end
 refresh()
 
@@ -1898,6 +1908,142 @@ do
             end
             refresh()
             task.wait(2)
+        end
+    end)
+end
+
+-- ===== Server Hop ก่อน Lottery =====
+-- 2 นาทีก่อน Lottery ถ้าผู้เล่นในเซิร์ฟเวอร์น้อยกว่า HOP_MIN_PLAYERS จะย้ายไปเซิร์ฟเวอร์ที่คนเยอะที่สุดที่ยังไม่เต็ม
+do
+    local TeleportService = game:GetService("TeleportService")
+    local HttpService = game:GetService("HttpService")
+    local HOP_FILE = "AntiAFK_Hop.json"
+    local httpReq = request or http_request
+        or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request)
+
+    local function getJson(url)
+        local body
+        if httpReq then
+            local ok, res = pcall(httpReq, { Url = url, Method = "GET" })
+            if ok and res and res.StatusCode == 200 then body = res.Body end
+        end
+        if not body then
+            local ok, res = pcall(function() return game:HttpGet(url) end)
+            if ok then body = res end
+        end
+        if body then
+            local ok, data = pcall(HttpService.JSONDecode, HttpService, body)
+            if ok then return data end
+        end
+    end
+
+    -- จำนวนครั้งที่ย้ายในรอบนี้ เก็บในไฟล์ เพราะสคริปต์เริ่มใหม่ทุกครั้งที่ย้ายเซิร์ฟเวอร์
+    local function loadHop()
+        local ok, data = pcall(function()
+            if isfile and readfile and isfile(HOP_FILE) then
+                return HttpService:JSONDecode(readfile(HOP_FILE))
+            end
+        end)
+        return (ok and type(data) == "table") and data or {}
+    end
+
+    local function saveHop(data)
+        pcall(function()
+            if writefile then writefile(HOP_FILE, HttpService:JSONEncode(data)) end
+        end)
+    end
+
+    -- เซิร์ฟเวอร์สาธารณะที่ยังไม่เต็ม เรียงจากคนมากไปน้อย
+    local function findServers()
+        local data = getJson(string.format(
+            "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true",
+            game.PlaceId))
+        if not data or type(data.data) ~= "table" then return nil end
+        local list = {}
+        for _, s in ipairs(data.data) do
+            if s.id ~= game.JobId and type(s.playing) == "number" and type(s.maxPlayers) == "number"
+                and s.playing < s.maxPlayers then
+                list[#list + 1] = s
+            end
+        end
+        table.sort(list, function(a, b) return a.playing > b.playing end)
+        return list
+    end
+
+    local hopping, hopStartedAt = false, 0
+    local triedIds = {}
+    TeleportService.TeleportInitFailed:Connect(function(player, result, msg)
+        if player == LocalPlayer and hopping then
+            hopping = false
+            hopStatus = "ย้ายเซิร์ฟไม่สำเร็จ · ลองเซิร์ฟถัดไป"
+            warn("[Anti AFK] Server Hop ล้มเหลว: " .. tostring(result) .. " " .. tostring(msg))
+        end
+    end)
+
+    task.spawn(function()
+        while gui.Parent do
+            if settings.serverHop then
+                if hopping and os.clock() - hopStartedAt > 25 then
+                    hopping = false -- teleport ค้าง ลองเซิร์ฟถัดไป
+                end
+                local ok, err = pcall(function()
+                    if hopping then return end
+                    local count = #Players:GetPlayers()
+                    local t = os.date("*t")
+                    if t.min ~= HOP_CHECK_MINUTE then
+                        hopStatus = string.format("ผู้เล่น %d คน · เช็กตอนนาที %02d", count, HOP_CHECK_MINUTE)
+                        return
+                    end
+                    if count >= HOP_MIN_PLAYERS then
+                        hopStatus = string.format("ผู้เล่น %d คน · พอสำหรับ Lottery", count)
+                        return
+                    end
+
+                    local key = string.format("%d-%d-%d", t.year, t.yday, t.hour)
+                    local hop = loadHop()
+                    if hop.key ~= key then hop = { key = key, count = 0 } end
+                    if hop.count >= HOP_MAX_PER_HOUR then
+                        hopStatus = string.format("ผู้เล่น %d คน · ย้ายครบ %d ครั้งแล้วรอบนี้", count, HOP_MAX_PER_HOUR)
+                        return
+                    end
+
+                    hopStatus = string.format("ผู้เล่น %d คน · กำลังหาเซิร์ฟ...", count)
+                    refresh()
+                    local servers = findServers()
+                    if not servers then
+                        hopStatus = "ดึงรายชื่อเซิร์ฟเวอร์ไม่ได้"
+                        return
+                    end
+                    local target
+                    for _, s in ipairs(servers) do
+                        if not triedIds[s.id] then target = s break end
+                    end
+                    -- ต้องมีคนมากกว่าเซิร์ฟนี้ และพอสำหรับ Lottery หลังเราเข้าไป
+                    if not target or target.playing + 1 < HOP_MIN_PLAYERS or target.playing < count then
+                        hopStatus = string.format("ผู้เล่น %d คน · ไม่มีเซิร์ฟที่คนพอ", count)
+                        return
+                    end
+
+                    hop.count += 1
+                    saveHop(hop)
+                    triedIds[target.id] = true
+                    hopping, hopStartedAt = true, os.clock()
+                    hopStatus = string.format("กำลังย้ายไปเซิร์ฟ %d/%d คน...", target.playing, target.maxPlayers)
+                    refresh()
+                    notify(string.format("ผู้เล่นไม่ถึง %d คน ย้ายไปเซิร์ฟ %d คน", HOP_MIN_PLAYERS, target.playing))
+                    print(string.format("[Anti AFK] Server Hop: %d คน -> %s (%d/%d)",
+                        count, target.id, target.playing, target.maxPlayers))
+                    TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
+                end)
+                if not ok then
+                    hopping = false
+                    hopStatus = "error: " .. tostring(err):sub(1, 60)
+                end
+            else
+                hopStatus = "ปิดอยู่"
+            end
+            refresh()
+            task.wait(3)
         end
     end)
 end
