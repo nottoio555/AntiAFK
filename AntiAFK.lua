@@ -29,7 +29,7 @@ local function notify(text)
     end)
 end
 
-local SCRIPT_VERSION = "v3.5"
+local SCRIPT_VERSION = "v3.6"
 
 -- กันรันซ้ำ: บอกเวอร์ชันที่รันอยู่ และเตือนถ้าโค้ดบน GitHub ใหม่กว่า
 if env.__AntiAFK_Loaded then
@@ -1590,9 +1590,11 @@ do
     -- ถ้าไม่มีปุ่ม แต่มีการ์ดโชว์อยู่ (CardDisplayGui) ให้คลิกที่การ์ดเพื่อรับ
     local CLAIM_WORDS = { "CLAIM", "COLLECT", "RECEIVE", "OK", "CONTINUE", "TAP", "CLICK", "AWESOME", "NICE" }
     local CLAIM_THAI = { "รับ", "ตกลง", "แตะ", "คลิก" }
-    local function findClaim(fuseBtn)
+    -- ไม่สนข้อความที่อยู่บนจอตั้งแต่ก่อนกด FUSION (ไม่ใช่หน้ารับรางวัล)
+    local function findClaim(fuseBtn, ignore)
         for _, d in ipairs(PlayerGui:GetDescendants()) do
-            if (d:IsA("TextButton") or d:IsA("TextLabel")) and d ~= fuseBtn and shown(d) then
+            if (d:IsA("TextButton") or d:IsA("TextLabel")) and d ~= fuseBtn
+                and not (ignore and ignore[d]) and shown(d) then
                 local up = clean(d.Text):upper()
                 if up ~= "" and #up <= 30 and not up:find("^FUSION") then
                     for _, w in ipairs(CLAIM_WORDS) do
@@ -1607,22 +1609,52 @@ do
         local display = PlayerGui:FindFirstChild("CardDisplayGui")
         if display and display:IsA("ScreenGui") and display.Enabled then
             for _, d in ipairs(display:GetDescendants()) do
-                if d:IsA("GuiObject") and d.Name == "CardTemplate" and shown(d) then return d end
+                if d:IsA("GuiObject") and d.Name == "CardTemplate" and shown(d)
+                    and not (ignore and ignore[d]) then return d end
             end
         end
     end
 
-    local function claimReward(fuseBtn)
+    -- จดสิ่งที่ตรงคำค้นและอยู่บนจออยู่แล้ว ก่อนกด FUSION
+    local function snapshotClaims(fuseBtn)
+        local ignore = {}
+        for _ = 1, 10 do
+            local d = findClaim(fuseBtn, ignore)
+            if not d then break end
+            ignore[d] = true
+        end
+        return ignore
+    end
+
+    local function isGone(target)
+        return not target:IsDescendantOf(PlayerGui) or not shown(target)
+    end
+
+    -- รอหน้ารับรางวัล กดรับ แล้วจบทันทีที่หน้านั้นหายไป
+    local function claimReward(fuseBtn, ignore)
         local claimed = 0
-        for _ = 1, 30 do
-            task.wait(0.2)
-            local target = findClaim(fuseBtn)
+        local deadline = os.clock() + 6
+        while os.clock() < deadline do
+            local target = findClaim(fuseBtn, ignore)
             if target then
                 press(target)
                 claimed += 1
-                task.wait(0.4)
+                -- รอให้หน้ารับรางวัลหาย (สูงสุด 1.5 วินาที)
+                local t0 = os.clock()
+                while os.clock() - t0 < 1.5 and not isGone(target) do
+                    task.wait(0.05)
+                end
+                if not isGone(target) then
+                    ignore[target] = true -- กดแล้วไม่หาย ไม่ใช่ปุ่มรับ ข้ามไป
+                end
+                -- มีหน้ารับซ้อนอีกไหม ดูแป๊บเดียวแล้วจบ
+                task.wait(0.15)
+                if not findClaim(fuseBtn, ignore) then break end
+                deadline = os.clock() + 2
             elseif claimed > 0 then
                 break
+            else
+                task.wait(0.1)
             end
         end
         return claimed
@@ -1681,13 +1713,14 @@ do
                         return
                     end
                     local before = totalCount(cards)
+                    local ignore = snapshotClaims(fuseBtn)
                     press(fuseBtn)
                     fuseStatus = "กำลัง Fuse..."
                     refresh()
 
                     -- กดรับรางวัลหลัง Fuse
-                    local claimed = claimReward(fuseBtn)
-                    task.wait(0.3)
+                    local claimed = claimReward(fuseBtn, ignore)
+                    task.wait(0.1)
 
                     local root2, title2 = findFusion()
                     local btn2 = root2 and findFuseButton(root2, title2)
