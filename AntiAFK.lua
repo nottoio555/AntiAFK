@@ -626,8 +626,7 @@ if AUTO_RECONNECT then
         if WEBHOOK_URL then
             code = string.format("getgenv().AntiAFK_Webhook = %q\n", WEBHOOK_URL)
         end
-        -- ต่อท้าย ?t=เวลา กัน GitHub ส่งไฟล์เวอร์ชันเก่าจาก cache (cache ไว้ 5 นาที)
-        code = code .. string.format("loadstring(game:HttpGet(%q .. \"?t=\" .. tostring(os.time())))()", SCRIPT_URL)
+        code = code .. string.format("loadstring(game:HttpGet(%q))()", SCRIPT_URL)
         -- ล้างคิวเก่าก่อน (ถ้า executor รองรับ) จะได้ไม่รันซ้อนหลายตัวหลังย้ายเซิร์ฟ
         pcall(function()
             local clear = clear_teleport_queue or (syn and syn.clear_teleport_queue)
