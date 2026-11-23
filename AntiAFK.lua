@@ -37,7 +37,7 @@ local function notify(text)
     end)
 end
 
-local SCRIPT_VERSION = "v3.10"
+local SCRIPT_VERSION = "v3.11"
 
 -- รันซ้ำในเกม: ปิดเซสชันเก่าก่อน แล้วเริ่มใหม่ (ไม่ต้อง rejoin)
 -- ทุกลูปของสคริปต์ทำงานตราบที่กล่องสถานะยังอยู่ ลบกล่องเก่าทิ้ง = ลูปเก่าหยุดเอง
@@ -50,6 +50,14 @@ if env.__AntiAFK_Loaded then
     pcall(function()
         if env.__AntiAFK_Conn then env.__AntiAFK_Conn:Disconnect() end
     end)
+    -- ลบกล่องสถานะทุกกล่องที่เคยสร้าง (เก็บ reference ไว้ใน getgenv ตั้งแต่ v3.11)
+    -- ใช้ reference เพราะบาง executor ซ่อนของใน gethui() จากการค้นหาด้วย GetChildren
+    if type(env.__AntiAFK_Guis) == "table" then
+        for _, old in ipairs(env.__AntiAFK_Guis) do
+            pcall(function() old:Destroy() end)
+        end
+        env.__AntiAFK_Guis = {}
+    end
     -- เวอร์ชันเก่าที่ยังไม่มี Cleanup: หากล่องสถานะเก่าแล้วลบทิ้ง
     local parents = {}
     pcall(function() if gethui then parents[#parents + 1] = gethui() end end)
@@ -57,11 +65,19 @@ if env.__AntiAFK_Loaded then
     pcall(function() parents[#parents + 1] = LocalPlayer:FindFirstChild("PlayerGui") end)
     for _, parent in ipairs(parents) do
         pcall(function()
-            for _, child in ipairs(parent:GetChildren()) do
-                if child.Name == "AntiAFKStatus" then child:Destroy() end
+            for _, child in ipairs(parent:GetDescendants()) do
+                if child.Name == "AntiAFKStatus" and child:IsA("ScreenGui") then child:Destroy() end
             end
         end)
     end
+    -- ของที่ถูกซ่อนไว้นอก game (getnilinstances) ถ้า executor รองรับ
+    pcall(function()
+        if getnilinstances then
+            for _, inst in ipairs(getnilinstances()) do
+                if inst.Name == "AntiAFKStatus" and inst:IsA("ScreenGui") then inst:Destroy() end
+            end
+        end
+    end)
     print(string.format("[Anti AFK] ปิดเซสชันเก่า (%s) แล้ว เริ่ม %s ใหม่", running, SCRIPT_VERSION))
     notify(string.format("ปิดเซสชันเก่า (%s) · เริ่ม %s", running, SCRIPT_VERSION))
     task.wait(1.5) -- ให้ลูปเก่าเห็นว่ากล่องหายแล้วหยุดก่อน
@@ -201,6 +217,8 @@ pcall(function()
     if syn and syn.protect_gui then syn.protect_gui(gui) end
 end)
 gui.Parent = getGuiParent()
+env.__AntiAFK_Guis = type(env.__AntiAFK_Guis) == "table" and env.__AntiAFK_Guis or {}
+table.insert(env.__AntiAFK_Guis, gui)
 
 -- ปิดเซสชันนี้: ตัด connection ทั้งหมด และลบกล่องสถานะ (ลูปทุกตัวจะหยุดเอง)
 local function cleanupSession()
@@ -608,7 +626,8 @@ if AUTO_RECONNECT then
         if WEBHOOK_URL then
             code = string.format("getgenv().AntiAFK_Webhook = %q\n", WEBHOOK_URL)
         end
-        code = code .. string.format("loadstring(game:HttpGet(%q))()", SCRIPT_URL)
+        -- ต่อท้าย ?t=เวลา กัน GitHub ส่งไฟล์เวอร์ชันเก่าจาก cache (cache ไว้ 5 นาที)
+        code = code .. string.format("loadstring(game:HttpGet(%q .. \"?t=\" .. tostring(os.time())))()", SCRIPT_URL)
         -- ล้างคิวเก่าก่อน (ถ้า executor รองรับ) จะได้ไม่รันซ้อนหลายตัวหลังย้ายเซิร์ฟ
         pcall(function()
             local clear = clear_teleport_queue or (syn and syn.clear_teleport_queue)
