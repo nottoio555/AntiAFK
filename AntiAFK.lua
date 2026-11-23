@@ -3,6 +3,14 @@
 
 local env = (getgenv and getgenv()) or _G
 
+-- ตั๋วเซสชัน: ตัวที่เริ่มล่าสุดเป็นตัวจริง ตัวอื่นปิดตัวเอง
+-- กันกรณีสคริปต์ถูกรันพร้อมกันหลายตัว (เช่นหลังย้ายเซิร์ฟเวอร์ queue_on_teleport รันซ้อน)
+local SESSION = string.format("%f-%d", os.clock(), math.random(1, 1e9))
+env.__AntiAFK_Session = SESSION
+local function isCurrent()
+    return env.__AntiAFK_Session == SESSION
+end
+
 local Players = game:GetService("Players")
 local VirtualUser = game:GetService("VirtualUser")
 local StarterGui = game:GetService("StarterGui")
@@ -29,10 +37,11 @@ local function notify(text)
     end)
 end
 
-local SCRIPT_VERSION = "v3.9"
+local SCRIPT_VERSION = "v3.10"
 
 -- รันซ้ำในเกม: ปิดเซสชันเก่าก่อน แล้วเริ่มใหม่ (ไม่ต้อง rejoin)
 -- ทุกลูปของสคริปต์ทำงานตราบที่กล่องสถานะยังอยู่ ลบกล่องเก่าทิ้ง = ลูปเก่าหยุดเอง
+if not isCurrent() then return end -- มีตัวที่เริ่มหลังกว่าแล้ว
 if env.__AntiAFK_Loaded then
     local running = env.__AntiAFK_Version or "v1"
     pcall(function()
@@ -56,6 +65,7 @@ if env.__AntiAFK_Loaded then
     print(string.format("[Anti AFK] ปิดเซสชันเก่า (%s) แล้ว เริ่ม %s ใหม่", running, SCRIPT_VERSION))
     notify(string.format("ปิดเซสชันเก่า (%s) · เริ่ม %s", running, SCRIPT_VERSION))
     task.wait(1.5) -- ให้ลูปเก่าเห็นว่ากล่องหายแล้วหยุดก่อน
+    if not isCurrent() then return end
 end
 env.__AntiAFK_Loaded = true
 env.__AntiAFK_Version = SCRIPT_VERSION
@@ -192,14 +202,27 @@ pcall(function()
 end)
 gui.Parent = getGuiParent()
 
--- ให้การรันครั้งถัดไปปิดเซสชันนี้ได้
-env.__AntiAFK_Cleanup = function()
+-- ปิดเซสชันนี้: ตัด connection ทั้งหมด และลบกล่องสถานะ (ลูปทุกตัวจะหยุดเอง)
+local function cleanupSession()
     for _, c in ipairs(sessionConns) do
         pcall(function() c:Disconnect() end)
     end
     table.clear(sessionConns)
     pcall(function() gui:Destroy() end)
 end
+env.__AntiAFK_Cleanup = cleanupSession
+
+-- ถ้ามีเซสชันใหม่เริ่มขึ้น ให้ตัวนี้ปิดตัวเองภายใน 0.5 วินาที
+task.spawn(function()
+    while gui.Parent do
+        if not isCurrent() then
+            cleanupSession()
+            print("[Anti AFK] พบเซสชันที่ใหม่กว่า ปิดเซสชันนี้แล้ว")
+            break
+        end
+        task.wait(0.5)
+    end
+end)
 
 local THEME = {
     bg = Color3.fromRGB(16, 16, 24),
@@ -441,11 +464,8 @@ task.spawn(function()
 end)
 
 -- ตัดการเชื่อมต่อเก่าถ้ามี
-if env.__AntiAFK_Conn then
-    pcall(function() env.__AntiAFK_Conn:Disconnect() end)
-end
-
-env.__AntiAFK_Conn = LocalPlayer.Idled:Connect(function()
+-- connection นี้เป็นของเซสชันนี้เท่านั้น (ถูกตัดตอนเซสชันปิด)
+env.__AntiAFK_Conn = trackConn(LocalPlayer.Idled:Connect(function()
     pcall(function()
         markSynthetic()
         VirtualUser:CaptureController()
@@ -454,7 +474,7 @@ env.__AntiAFK_Conn = LocalPlayer.Idled:Connect(function()
     kickBlocked += 1
     refresh()
     print(string.format("[Anti AFK] ส่ง input ปลอมครั้งที่ %d", kickBlocked))
-end)
+end))
 
 -- ===== ข้ามหน้าโหลด =====
 -- บางเกมมีหน้าโหลดเต็มจอที่ต้องคลิก 1 ครั้งก่อนเข้าเกม ส่วนนี้จะคลิกให้อัตโนมัติ
@@ -589,6 +609,11 @@ if AUTO_RECONNECT then
             code = string.format("getgenv().AntiAFK_Webhook = %q\n", WEBHOOK_URL)
         end
         code = code .. string.format("loadstring(game:HttpGet(%q))()", SCRIPT_URL)
+        -- ล้างคิวเก่าก่อน (ถ้า executor รองรับ) จะได้ไม่รันซ้อนหลายตัวหลังย้ายเซิร์ฟ
+        pcall(function()
+            local clear = clear_teleport_queue or (syn and syn.clear_teleport_queue)
+            if clear then clear() end
+        end)
         pcall(queue, code)
     end
 
