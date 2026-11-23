@@ -37,7 +37,7 @@ local function notify(text)
     end)
 end
 
-local SCRIPT_VERSION = "v3.12"
+local SCRIPT_VERSION = "v3.13"
 
 -- รันซ้ำในเกม: ปิดเซสชันเก่าก่อน แล้วเริ่มใหม่ (ไม่ต้อง rejoin)
 -- ทุกลูปของสคริปต์ทำงานตราบที่กล่องสถานะยังอยู่ ลบกล่องเก่าทิ้ง = ลูปเก่าหยุดเอง
@@ -1992,6 +1992,20 @@ do
         return true
     end
 
+    local GuiService = game:GetService("GuiService")
+    local PLACED_RADIUS = 200   -- ถ้าหาบ้านตัวเองไม่เจอ ใช้ป้ายการ์ดในระยะนี้ (stud) จากตัวละคร
+
+    -- ตำแหน่งกลางของ object บนจอ (รวมแถบด้านบนของ Roblox ถ้า ScreenGui ไม่ได้ IgnoreGuiInset)
+    local function centerOnScreen(obj)
+        local p, s = obj.AbsolutePosition, obj.AbsoluteSize
+        local x, y = p.X + s.X / 2, p.Y + s.Y / 2
+        local sg = obj:FindFirstAncestorWhichIsA("ScreenGui")
+        if sg and not sg.IgnoreGuiInset then
+            local inset = GuiService:GetGuiInset()
+            x, y = x + inset.X, y + inset.Y
+        end
+        return x, y
+    end
     -- ชี้เมาส์ (จำลอง) บนการ์ดเพื่อให้เกมแสดง tooltip แล้วอ่าน Income
     local function hoverIncome(info, inv)
         local targets = { info.tile }
@@ -2010,9 +2024,9 @@ do
                 sf.CanvasPosition = Vector2.new(sf.CanvasPosition.X, math.max(0, y - 10))
                 task.wait(0.05)
             end
-            local p, s = info.tile.AbsolutePosition, info.tile.AbsoluteSize
+            local mx, my = centerOnScreen(info.tile)
             markSynthetic()
-            pcall(function() VIM:SendMouseMoveEvent(p.X + s.X / 2, p.Y + s.Y / 2 + 36, game) end)
+            pcall(function() VIM:SendMouseMoveEvent(mx, my, game) end)
         end
         local income, theme
         for _ = 1, 6 do
@@ -2059,7 +2073,7 @@ do
         return b
     end
     local tabIncome = topButton("💰 Income มาก → น้อย", 20, 170)
-    local tabEquipped = topButton("✅ ใบที่วางอยู่", 198, 130)
+    local tabEquipped = topButton("🏠 วางในบ้าน", 198, 130)
     local refreshBtn = topButton("🔄 อ่านใหม่", 336, 100)
 
     local closeBtn = make("TextButton", {
@@ -2102,11 +2116,132 @@ do
         end))
     end
 
+    -- ---------- การ์ดที่วางในบ้าน (อ่านจากป้าย Income เหนือแท่นวางในโลก) ----------
+    local INCOME_PATTERN = "^%+%$[%d,%.]+%a*/[sS]$"
+
+    local function billboardIncome(bb)
+        for _, d in ipairs(bb:GetDescendants()) do
+            if d:IsA("TextLabel") and clean(d.Text):match(INCOME_PATTERN) then return d end
+        end
+    end
+
+    local function worldPos(inst)
+        if inst:IsA("BasePart") then return inst.Position end
+        if inst:IsA("Attachment") then return inst.WorldPosition end
+        if inst:IsA("Model") then
+            local ok, cf = pcall(function() return inst:GetPivot() end)
+            if ok then return cf.Position end
+        end
+    end
+
+    -- หาบ้านของเรา: object ที่มีค่า Owner เป็นตัวเรา (ObjectValue / StringValue / Attribute)
+    local function findMyPlot()
+        local me, myName, myId = LocalPlayer, LocalPlayer.Name, LocalPlayer.UserId
+        local function isMe(v)
+            return v == me or v == myName or v == myId or v == tostring(myId)
+        end
+        for _, d in ipairs(workspace:GetDescendants()) do
+            local hit = false
+            if d:IsA("ValueBase") and d.Name:lower():find("owner") then
+                local ok, v = pcall(function() return d.Value end)
+                if ok and isMe(v) then hit = true end
+            elseif d:IsA("Model") or d:IsA("Folder") then
+                for k, v in pairs(d:GetAttributes()) do
+                    if k:lower():find("owner") and isMe(v) then hit = true end
+                end
+            end
+            if hit then
+                -- ไล่ขึ้นไปจนเจอชั้นที่มีป้าย Income อยู่ข้างใน
+                local cur = d:IsA("ValueBase") and d.Parent or d
+                while cur and cur ~= workspace do
+                    for _, bb in ipairs(cur:GetDescendants()) do
+                        if bb:IsA("BillboardGui") and billboardIncome(bb) then return cur end
+                    end
+                    cur = cur.Parent
+                end
+            end
+        end
+    end
+
+    local function readBillboard(bb)
+        local info = { level = 1, placed = true }
+        local nameLabel, nameScore = nil, -1
+        for _, d in ipairs(bb:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                local tx = clean(d.Text)
+                local up = tx:upper()
+                if tx == "" then
+                    -- ข้าม
+                elseif tx:match(INCOME_PATTERN) then
+                    info.income = parseNumber(tx)
+                elseif up:match("^LV%.?%s*%d+$") then
+                    info.level = tonumber(up:match("(%d+)"))
+                elseif up:match("^GR%.?%s*%d+$") then
+                    -- grade ข้าม
+                elseif RARITY_COLORS[lettersOf(tx)] and not tx:find("%(") then
+                    info.rarity = info.rarity or lettersOf(tx)
+                elseif up:match("%a") then
+                    local score = d.Size.Y.Scale * 1000 + d.Size.Y.Offset + d.TextSize
+                    if score > nameScore then nameLabel, nameScore = tx, score end
+                end
+            end
+        end
+        if not nameLabel or not info.income then return nil end
+        info.name = nameLabel
+
+        -- รูปการ์ดบนแท่น: ImageLabel ใน SurfaceGui หรือ Decal ในโมเดลเดียวกัน
+        local model = bb:FindFirstAncestorWhichIsA("Model") or bb.Parent
+        if model then
+            local best, area = nil, 0
+            for _, d in ipairs(model:GetDescendants()) do
+                if d:IsA("ImageLabel") and d.Image ~= "" and d:FindFirstAncestorWhichIsA("SurfaceGui") then
+                    local a = d.AbsoluteSize.X * d.AbsoluteSize.Y + 1
+                    if a > area then best, area = { Image = d.Image, ImageRectOffset = d.ImageRectOffset, ImageRectSize = d.ImageRectSize }, a end
+                end
+            end
+            if not best then
+                for _, d in ipairs(model:GetDescendants()) do
+                    if d:IsA("Decal") and d.Texture ~= "" then best = { Image = d.Texture } break end
+                end
+            end
+            info.image = best
+        end
+        return info
+    end
+
+    local function scanPlaced()
+        local char = LocalPlayer.Character
+        local plot = findMyPlot()
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local list = {}
+        local scope = plot or workspace
+        for _, bb in ipairs(scope:GetDescendants()) do
+            if bb:IsA("BillboardGui") and billboardIncome(bb)
+                and not (char and bb:IsDescendantOf(char)) then -- การ์ดที่ถืออยู่ไม่นับ
+                local ok = true
+                if not plot then
+                    -- หาบ้านไม่เจอ: ใช้เฉพาะป้ายที่อยู่ใกล้ตัว (ต้องยืนอยู่ในบ้านตัวเอง)
+                    local pos = worldPos(bb.Adornee or bb.Parent)
+                    ok = root and pos and (pos - root.Position).Magnitude <= PLACED_RADIUS
+                end
+                if ok then
+                    local info = readBillboard(bb)
+                    if info then list[#list + 1] = info end
+                end
+            end
+        end
+        return list, plot ~= nil
+    end
+
     local function cardTile(info, rank)
         local color = RARITY_COLORS[info.rarity or ""] or THEME.accent
-        local f = make("Frame", { BackgroundColor3 = THEME.card, BorderSizePixel = 0, LayoutOrder = rank }, grid)
+        local clickable = info.tile ~= nil
+        local f = make("TextButton", {
+            Text = "", AutoButtonColor = clickable, BackgroundColor3 = THEME.card,
+            BorderSizePixel = 0, LayoutOrder = rank,
+        }, grid)
         corner(f, 10)
-        make("UIStroke", { Color = info.equipped and THEME.ok or color, Thickness = info.equipped and 2 or 1.2 }, f)
+        make("UIStroke", { Color = info.equipped and THEME.warn or color, Thickness = info.equipped and 2 or 1.2 }, f)
 
         local pic = make("ImageLabel", {
             Position = UDim2.fromOffset(6, 6), Size = UDim2.new(1, -12, 0, 108),
@@ -2133,16 +2268,18 @@ do
             }, f)
             corner(lv, 6)
         end
+        local tagText, tagColor
         if info.equipped then
-            make("TextLabel", {
-                Text = "✓ วางอยู่", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = Color3.new(1, 1, 1),
-                BackgroundColor3 = Color3.fromRGB(30, 160, 80), BorderSizePixel = 0,
-                Position = UDim2.new(0, 6, 0, 96), Size = UDim2.new(1, -12, 0, 18),
-            }, f)
+            tagText, tagColor = "✋ ถืออยู่", Color3.fromRGB(210, 140, 30)
+        elseif info.placed then
+            tagText, tagColor = "🏠 วางในบ้าน", Color3.fromRGB(30, 160, 80)
         elseif info.badge then
+            tagText, tagColor = "✨ " .. info.badge, Color3.fromRGB(140, 60, 220)
+        end
+        if tagText then
             make("TextLabel", {
-                Text = "✨ " .. info.badge, Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = Color3.new(1, 1, 1),
-                BackgroundColor3 = Color3.fromRGB(140, 60, 220), BorderSizePixel = 0,
+                Text = tagText, Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = Color3.new(1, 1, 1),
+                BackgroundColor3 = tagColor, BorderSizePixel = 0,
                 Position = UDim2.new(0, 6, 0, 96), Size = UDim2.new(1, -12, 0, 18),
             }, f)
         end
@@ -2165,26 +2302,80 @@ do
             BackgroundTransparency = 1, Position = UDim2.fromOffset(6, 156), Size = UDim2.new(1, -12, 0, 18),
         }, f)
         make("TextLabel", {
-            Text = info.income and string.format("%s/s", (tostring(math.floor(info.income)):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", ""))) or "",
+            Text = clickable and "กดเพื่อถือการ์ดใบนี้" or (info.income and string.format("%s/s",
+                (tostring(math.floor(info.income)):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", ""))) or ""),
             Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = THEME.sub,
             BackgroundTransparency = 1, Position = UDim2.fromOffset(6, 175), Size = UDim2.new(1, -12, 0, 14),
         }, f)
+        return f
     end
 
     -- ---------- ข้อมูลและการแสดงผล ----------
     local cards = {}
+    local placedCards, placedByPlot = {}, false
     local incomeCache = {}   -- key การ์ด -> { income, theme }
     local mode = "income"
     local scanning = false
+    local scan -- ประกาศไว้ก่อน ใช้ใน equipCard
+
+    -- ถือการ์ด: กดช่องการ์ดใบนั้นในกระเป๋าของเกม (เกมเขียนไว้ว่า CLICK TO EQUIP)
+    -- กดที่ตัวช่องเท่านั้น ไม่กดปุ่มล็อก (ซ้ายบน) หรือปุ่มขาย (ขวาบน)
+    local function equipCard(info)
+        local tile = info.tile
+        if not tile or not tile:IsDescendantOf(PlayerGui) then
+            summary.Text = "การ์ดใบนี้ไม่อยู่ในกระเป๋าแล้ว · กด อ่านใหม่"
+            return
+        end
+        local btn = tile:IsA("GuiButton") and tile or nil
+        if not btn then
+            local ta = tile.AbsoluteSize.X * tile.AbsoluteSize.Y
+            for _, d in ipairs(tile:GetDescendants()) do
+                if d:IsA("GuiButton") and d.AbsoluteSize.X * d.AbsoluteSize.Y >= ta * 0.5 then btn = d break end
+            end
+        end
+        local fired = false
+        if btn and getconnections then
+            for _, sig in ipairs({ btn.MouseButton1Click, btn.Activated }) do
+                local ok, conns = pcall(getconnections, sig)
+                if ok and conns and #conns > 0 then
+                    for _, c in ipairs(conns) do pcall(function() c:Fire() end) end
+                    fired = true
+                    break
+                end
+            end
+        end
+        if not fired then
+            local target = btn or tile
+            local inv = tile:FindFirstAncestorWhichIsA("ScreenGui")
+            if not (inv and inv.Enabled and visibleWithin(target, inv)) then
+                summary.Text = "เปิดกระเป๋าในเกมค้างไว้ก่อน แล้วกดการ์ดอีกครั้ง"
+                return
+            end
+            local sf = target:FindFirstAncestorWhichIsA("ScrollingFrame")
+            if sf then
+                local y = target.AbsolutePosition.Y - sf.AbsolutePosition.Y + sf.CanvasPosition.Y
+                sf.CanvasPosition = Vector2.new(sf.CanvasPosition.X, math.max(0, y - 10))
+                task.wait(0.1)
+            end
+            local x, y = centerOnScreen(target)
+            pcall(function()
+                markSynthetic(); VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                task.wait(0.05)
+                markSynthetic(); VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+            end)
+        end
+        summary.Text = "กำลังถือ " .. info.name .. " ..."
+        notify("ถือการ์ด " .. info.name)
+        task.wait(0.8)
+        scan()
+    end
 
     local function render()
         for _, c in ipairs(grid:GetChildren()) do
             if c:IsA("GuiObject") then c:Destroy() end
         end
-        local list = {}
-        for _, c in ipairs(cards) do
-            if mode == "income" or c.equipped then list[#list + 1] = c end
-        end
+        local list = mode == "income" and cards or placedCards
+        list = table.clone(list)
         table.sort(list, function(a, b)
             if (a.income ~= nil) ~= (b.income ~= nil) then return a.income ~= nil end
             if a.income and b.income and a.income ~= b.income then return a.income > b.income end
@@ -2192,39 +2383,46 @@ do
         end)
         local total, known = 0, 0
         for i, c in ipairs(list) do
-            cardTile(c, i)
+            local f = cardTile(c, i)
+            if c.tile then
+                f.MouseButton1Click:Connect(function() task.spawn(equipCard, c) end)
+            end
             if c.income then total += c.income known += 1 end
         end
         tabIncome.BackgroundColor3 = mode == "income" and THEME.accent or THEME.card
-        tabEquipped.BackgroundColor3 = mode == "equipped" and THEME.accent or THEME.card
+        tabEquipped.BackgroundColor3 = mode == "placed" and THEME.accent or THEME.card
         if mode == "income" then
-            summary.Text = string.format("การ์ดทั้งหมด %d ใบ · อ่าน Income ได้ %d ใบ · เรียงจาก Income มากไปน้อย", #list, known)
+            summary.Text = string.format("ในกระเป๋า %d ใบ · อ่าน Income ได้ %d ใบ · กดการ์ดเพื่อถือ", #list, known)
+        elseif #list == 0 then
+            summary.Text = "ไม่พบการ์ดที่วางในบ้าน · ลองยืนอยู่ในบ้านตัวเองแล้วกด อ่านใหม่"
         else
-            summary.Text = string.format("วางใช้งานอยู่ %d ใบ · รวม +%s/s", #list, fmtMoney(total))
+            summary.Text = string.format("วางในบ้าน %d ใบ · รวม +%s/s%s", #list, fmtMoney(total),
+                placedByPlot and "" or " · (หาบ้านไม่เจอ ใช้ป้ายที่อยู่ใกล้ตัว)")
         end
     end
 
-    local function scan()
+    scan = function()
         if scanning then return end
         scanning = true
         local ok, err = pcall(function()
-            local list, inv = inventoryList()
-            if not list then
-                viewerStatus = "เปิด Inventory ในเกม 1 ครั้งก่อน"
-                summary.Text = "ไม่พบ InventoryGui · เปิดกระเป๋าในเกม 1 ครั้งแล้วกด อ่านใหม่"
-                return
+            -- การ์ดที่วางในบ้าน
+            local okP, list, byPlot = pcall(scanPlaced)
+            if okP then
+                placedCards, placedByPlot = list, byPlot
+            else
+                warn("[Anti AFK] Card Viewer (บ้าน): " .. tostring(list))
             end
+
+            -- การ์ดในกระเป๋า
+            local invList, inv = inventoryList()
             local found = {}
-            for _, tile in ipairs(list:GetChildren()) do
-                if tile:IsA("GuiObject") then
-                    local info = readTile(tile)
-                    if info then found[#found + 1] = info end
+            if invList then
+                for _, tile in ipairs(invList:GetChildren()) do
+                    if tile:IsA("GuiObject") then
+                        local info = readTile(tile)
+                        if info then found[#found + 1] = info end
+                    end
                 end
-            end
-            if #found == 0 then
-                viewerStatus = "ไม่พบการ์ดใน Inventory"
-                summary.Text = "ยังไม่มีการ์ดในรายการ · เปิดกระเป๋าในเกม 1 ครั้งแล้วกด อ่านใหม่"
-                return
             end
             for i, info in ipairs(found) do
                 local cached = incomeCache[info.key]
@@ -2240,10 +2438,11 @@ do
                 end
             end
             cards = found
-            local eq = 0
-            for _, c in ipairs(cards) do if c.equipped then eq += 1 end end
-            viewerStatus = string.format("%d ใบ · วางอยู่ %d ใบ", #cards, eq)
+            viewerStatus = string.format("กระเป๋า %d ใบ · วางในบ้าน %d ใบ", #cards, #placedCards)
             render()
+            if not invList and mode == "income" then
+                summary.Text = "ไม่พบ InventoryGui · เปิดกระเป๋าในเกม 1 ครั้งแล้วกด อ่านใหม่"
+            end
         end)
         if not ok then
             viewerStatus = "error: " .. tostring(err):sub(1, 60)
@@ -2254,7 +2453,7 @@ do
     end
 
     tabIncome.MouseButton1Click:Connect(function() mode = "income" render() end)
-    tabEquipped.MouseButton1Click:Connect(function() mode = "equipped" render() end)
+    tabEquipped.MouseButton1Click:Connect(function() mode = "placed" render() end)
     refreshBtn.MouseButton1Click:Connect(function() task.spawn(scan) end)
     closeBtn.MouseButton1Click:Connect(function() window.Visible = false end)
 
