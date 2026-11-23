@@ -29,7 +29,7 @@ local function notify(text)
     end)
 end
 
-local SCRIPT_VERSION = "v3.8"
+local SCRIPT_VERSION = "v3.9"
 
 -- รันซ้ำในเกม: ปิดเซสชันเก่าก่อน แล้วเริ่มใหม่ (ไม่ต้อง rejoin)
 -- ทุกลูปของสคริปต์ทำงานตราบที่กล่องสถานะยังอยู่ ลบกล่องเก่าทิ้ง = ลูปเก่าหยุดเอง
@@ -102,14 +102,12 @@ local loadingStatus = "กำลังตรวจหน้าโหลด..."
 local eventStatus = "กำลังเริ่ม"
 local rebirthStatus = "กำลังอ่านค่า..."
 local webhookStatus = "กำลังเริ่ม"
-local lockStatus = "ปิดอยู่"
 local fuseStatus = "ปิดอยู่"
 local afkBuyStatus = "กำลังเริ่ม"
-local hopStatus = "กำลังเริ่ม"
 
 -- ค่าเปิด/ปิดของปุ่ม Toggle (จำไว้ในไฟล์ จะได้ใช้ค่าเดิมหลัง rejoin)
 local SETTINGS_FILE = "AntiAFK_Settings.json"
-local settings = { autoLock = false, autoFuse = false, afkBuy = true, serverHop = true }
+local settings = { autoFuse = false, afkBuy = true }
 do
     local Http = game:GetService("HttpService")
     pcall(function()
@@ -129,9 +127,6 @@ local function saveSettings()
     end)
 end
 
--- ตั้งค่า Auto Lock: ล็อกการ์ดที่ชื่อหรือป้ายมีคำเหล่านี้
-local LOCK_TAGS = { "PRISM", "HOLO" }
-
 -- ตั้งค่า Auto Fuse: ใช้การ์ด 6 ใบที่ชื่อไม่ซ้ำกัน จากรายชื่อนี้
 local FUSE_MEMBERS = { "RUKA", "PHARITA", "ASA", "AHYEON", "RAMI", "RORA", "CHIQUITA" }
 local FUSE_SLOTS = 6
@@ -140,13 +135,8 @@ local FUSE_DELAY = 4                -- วินาทีที่รอก่�
 local FUSE_ALLOW_SPECIAL = true     -- true = ใช้การ์ด SHINY / PRISM / HOLO ใน Fuse ได้ (ใช้ใบธรรมดาก่อนถ้าจำนวนเท่ากัน)
 
 -- ตั้งค่า AFK Buy: ถ้าไม่ได้ขยับนานเกินเวลานี้ จะเปิด AFK MODE ให้ และตั้งให้ซื้อแพ็คท้ายๆ
-local AFK_BUY_IDLE = 300            -- วินาที (5 นาที)
+local AFK_BUY_IDLE = 120            -- วินาที (2 นาที)
 local AFK_BUY_LAST = 4              -- จำนวนแพ็คท้ายรายการที่ต้องเป็น BUYING เสมอ
-
--- ตั้งค่า Server Hop ก่อน Lottery: Lottery เริ่มเมื่อมีผู้เล่นอย่างน้อย 4 คน
-local HOP_MIN_PLAYERS = 4           -- จำนวนผู้เล่นขั้นต่ำ (นับตัวเองด้วย)
-local HOP_CHECK_MINUTE = 58         -- เช็กตอนนาทีนี้ (2 นาทีก่อน Lottery ที่นาที 00)
-local HOP_MAX_PER_HOUR = 3          -- ย้ายเซิร์ฟเวอร์ได้สูงสุดกี่ครั้งต่อรอบ กันย้ายวนไม่จบ
 
 -- จดเวลาที่สคริปต์คลิกเอง เพื่อไม่ให้นับเป็นการขยับของผู้ใช้
 local lastSyntheticInput = 0
@@ -371,17 +361,11 @@ addRow("event", "🎰", "Lottery " .. SCRIPT_VERSION
     .. (EVENT_FIXED_NUMBER and " · เลขคงที่" or " · สุ่มเลข 00-99"), 4)
 addRow("rebirth", "⭐", "Rebirth", 5)
 addRow("webhook", "📨", "Discord Webhook", 6)
-addRow("lock", "🔒", "Auto Lock PRISM / HOLO", 7, "autoLock", function(on)
-    lockStatus = on and "เปิดอยู่ · เปิดหน้า Inventory ค้างไว้" or "ปิดอยู่"
-end)
-addRow("fuse", "🧬", "Auto Fuse", 8, "autoFuse", function(on)
+addRow("fuse", "🧬", "Auto Fuse", 7, "autoFuse", function(on)
     fuseStatus = on and "เปิดอยู่ · เปิดหน้า Fusion ค้างไว้" or "ปิดอยู่"
 end)
-addRow("afkbuy", "💤", "AFK Buy · ซื้อ " .. AFK_BUY_LAST .. " แพ็คท้าย", 9, "afkBuy", function(on)
+addRow("afkbuy", "💤", "AFK Buy · ซื้อ " .. AFK_BUY_LAST .. " แพ็คท้าย", 8, "afkBuy", function(on)
     afkBuyStatus = on and "เปิดอยู่" or "ปิดอยู่"
-end)
-addRow("hop", "🌐", "Server Hop ก่อน Lottery", 10, "serverHop", function(on)
-    hopStatus = on and "เปิดอยู่" or "ปิดอยู่"
 end)
 
 -- ย่อ/ขยาย
@@ -443,10 +427,8 @@ local function refresh()
     setRow("event", eventStatus)
     setRow("rebirth", rebirthStatus)
     setRow("webhook", webhookStatus)
-    setRow("lock", lockStatus)
     setRow("fuse", fuseStatus)
     setRow("afkbuy", afkBuyStatus)
-    setRow("hop", hopStatus)
 end
 refresh()
 
@@ -1250,7 +1232,7 @@ if WEBHOOK_ENABLED then
     end
 end
 
--- ===== Auto Lock PRISM/HOLO และ Auto Fuse (กดปุ่มใน UI ของเกม) =====
+-- ===== Auto Fuse และ AFK Buy (กดปุ่มใน UI ของเกม) =====
 do
     local VIM = game:GetService("VirtualInputManager")
     local GuiService = game:GetService("GuiService")
@@ -1335,168 +1317,6 @@ do
             markSynthetic(); VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
         end)
     end
-
-    -- ---------- Auto Lock ----------
-    local lockBroken = false
-    local lockDone = 0
-
-    local function isOrange(c)
-        return c.R > 0.75 and c.G > 0.3 and c.G < 0.8 and c.B < 0.35
-    end
-
-    -- ไอคอนล็อกของการ์ดที่ล็อกแล้วเป็นสีส้ม (ดูจากรูป Inventory)
-    local function lockLooksOn(btn)
-        local function check(o)
-            if o:IsA("GuiObject") and not o.Visible then return false end
-            if (o:IsA("ImageLabel") or o:IsA("ImageButton")) and o.Image ~= ""
-                and o.ImageTransparency < 0.5 and isOrange(o.ImageColor3) then return true end
-            if o:IsA("GuiObject") and o.BackgroundTransparency < 0.6 and isOrange(o.BackgroundColor3) then return true end
-            if o:IsA("UIStroke") and o.Enabled and o.Transparency < 0.6 and isOrange(o.Color) then return true end
-            if (o:IsA("TextLabel") or o:IsA("TextButton")) and o.Text ~= ""
-                and o.TextTransparency < 0.5 and isOrange(o.TextColor3) then return true end
-            return false
-        end
-        if check(btn) then return true end
-        for _, d in ipairs(btn:GetDescendants()) do
-            if check(d) then return true end
-        end
-        return false
-    end
-
-    local function isLockedTile(tile, btn)
-        for _, name in ipairs({ "Locked", "IsLocked", "locked" }) do
-            local v = tile:GetAttribute(name)
-            if v == nil then v = btn:GetAttribute(name) end
-            if type(v) == "boolean" then return v end
-        end
-        return lockLooksOn(btn)
-    end
-
-    local function isTargetTile(tile)
-        for _, t in ipairs(textsOf(tile)) do
-            for _, tag in ipairs(LOCK_TAGS) do
-                if t.up:find(tag, 1, true) then return true end
-            end
-        end
-        return false
-    end
-
-    -- ปุ่มล็อกอยู่มุมซ้ายบน (มุมขวาบนคือปุ่มขาย ห้ามกด)
-    local function findLockButton(tile)
-        for _, d in ipairs(tile:GetDescendants()) do
-            if d:IsA("GuiButton") and d.Name:lower():find("lock") then return d end
-        end
-        local tp, ts = tile.AbsolutePosition, tile.AbsoluteSize
-        for _, d in ipairs(tile:GetDescendants()) do
-            if d:IsA("GuiButton") then
-                local n = d.Name:lower()
-                if not (n:find("sell") or n:find("money") or n:find("coin") or n:find("equip")) then
-                    local cx = d.AbsolutePosition.X + d.AbsoluteSize.X / 2
-                    local cy = d.AbsolutePosition.Y + d.AbsoluteSize.Y / 2
-                    if cx < tp.X + ts.X * 0.35 and cy < tp.Y + ts.Y * 0.3 then return d end
-                end
-            end
-        end
-    end
-
-    local function inventoryList()
-        local inv = PlayerGui:FindFirstChild("InventoryGui")
-        if not inv then return nil end
-        for _, d in ipairs(inv:GetDescendants()) do
-            if d:IsA("ScrollingFrame") and shown(d) then return d end
-        end
-    end
-
-    -- นับการ์ด PRISM/HOLO ทั้งหมดในรายการ แยกเป็นล็อกแล้ว / ยังไม่ล็อก
-    -- ใช้จำนวนรวมตรวจผล เพราะเกมสร้างรายการการ์ดใหม่ทุกครั้งที่กดล็อก (ปุ่มเดิมหายไป)
-    local function scanTargets(list)
-        local unlocked, lockedN = {}, 0
-        for _, tile in ipairs(list:GetChildren()) do
-            if tile:IsA("GuiObject") and tile.Visible and isTargetTile(tile) then
-                local btn = findLockButton(tile)
-                if btn then
-                    if isLockedTile(tile, btn) then
-                        lockedN += 1
-                    else
-                        unlocked[#unlocked + 1] = { tile = tile, btn = btn }
-                    end
-                end
-            end
-        end
-        return unlocked, lockedN
-    end
-
-    local function tileName(tile)
-        local t = textsOf(tile)
-        for _, x in ipairs(t) do
-            if x.up:find("%(") then return x.text end
-        end
-        return t[1] and t[1].text or tile.Name
-    end
-
-    -- กดล็อก 1 ใบ แล้วรอดูผลสูงสุด 4 วินาที (server อาจตอบช้า)
-    local function lockOne(list, target, lockedBefore, unlockedBefore)
-        local name = tileName(target.tile)
-        press(target.btn)
-        for _ = 1, 8 do
-            task.wait(0.5)
-            local current = inventoryList() or list
-            local unlocked, lockedN = scanTargets(current)
-            if lockedN > lockedBefore and #unlocked < unlockedBefore then
-                return "locked", name
-            end
-        end
-        -- จำนวนไม่เปลี่ยน: ถ้าปุ่มเดิมยังอยู่ ให้กดกลับเพื่อคืนสถานะเดิม
-        if target.btn:IsDescendantOf(PlayerGui) then
-            press(target.btn)
-            task.wait(0.8)
-            return "failed", name
-        end
-        return "unknown", name
-    end
-
-    task.spawn(function()
-        while gui.Parent do
-            local waitTime = 2
-            if settings.autoLock then
-                lockBroken = false -- ผู้ใช้เปิดใหม่เอง ให้ลองอีกครั้ง
-                local ok, err = pcall(function()
-                    local list = inventoryList()
-                    if not list then
-                        lockStatus = string.format("รอเปิดหน้า Inventory · ล็อกแล้ว %d ใบ", lockDone)
-                        return
-                    end
-                    local unlocked, lockedN = scanTargets(list)
-                    if #unlocked == 0 then
-                        lockStatus = string.format("ครบแล้ว · ล็อกอยู่ %d ใบ (รอบนี้ล็อก %d ใบ)", lockedN, lockDone)
-                        return
-                    end
-
-                    lockStatus = string.format("กำลังล็อก · เหลือ %d ใบ", #unlocked)
-                    refresh()
-                    local result, name = lockOne(list, unlocked[1], lockedN, #unlocked)
-                    if result == "locked" then
-                        lockDone += 1
-                        print("[Anti AFK] ล็อกการ์ดแล้ว: " .. name)
-                        waitTime = 0.3 -- ทำใบถัดไปต่อเลย
-                    else
-                        lockBroken = true
-                        forceOff("autoLock")
-                        lockStatus = "ตรวจสถานะล็อกไม่ได้ · ปิด Auto Lock แล้ว"
-                        warn(string.format("[Anti AFK] Auto Lock: กดล็อก %s แล้วจำนวนที่ล็อกไม่เพิ่ม (%s) หยุดระบบเพื่อความปลอดภัย", name, result))
-                        notify("Auto Lock หยุดทำงาน กรุณาเช็กการ์ด " .. name)
-                    end
-                end)
-                if not ok then
-                    lockStatus = "error: " .. tostring(err):sub(1, 60)
-                end
-            elseif not lockBroken then
-                lockStatus = "ปิดอยู่"
-            end
-            refresh()
-            task.wait(waitTime)
-        end
-    end)
 
     -- ---------- Auto Fuse ----------
     local SUFFIX = { K = 1e3, M = 1e6, B = 1e9, T = 1e12, QA = 1e15, QI = 1e18 }
@@ -1964,142 +1784,6 @@ do
             end
             refresh()
             task.wait(2)
-        end
-    end)
-end
-
--- ===== Server Hop ก่อน Lottery =====
--- 2 นาทีก่อน Lottery ถ้าผู้เล่นในเซิร์ฟเวอร์น้อยกว่า HOP_MIN_PLAYERS จะย้ายไปเซิร์ฟเวอร์ที่คนเยอะที่สุดที่ยังไม่เต็ม
-do
-    local TeleportService = game:GetService("TeleportService")
-    local HttpService = game:GetService("HttpService")
-    local HOP_FILE = "AntiAFK_Hop.json"
-    local httpReq = request or http_request
-        or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request)
-
-    local function getJson(url)
-        local body
-        if httpReq then
-            local ok, res = pcall(httpReq, { Url = url, Method = "GET" })
-            if ok and res and res.StatusCode == 200 then body = res.Body end
-        end
-        if not body then
-            local ok, res = pcall(function() return game:HttpGet(url) end)
-            if ok then body = res end
-        end
-        if body then
-            local ok, data = pcall(HttpService.JSONDecode, HttpService, body)
-            if ok then return data end
-        end
-    end
-
-    -- จำนวนครั้งที่ย้ายในรอบนี้ เก็บในไฟล์ เพราะสคริปต์เริ่มใหม่ทุกครั้งที่ย้ายเซิร์ฟเวอร์
-    local function loadHop()
-        local ok, data = pcall(function()
-            if isfile and readfile and isfile(HOP_FILE) then
-                return HttpService:JSONDecode(readfile(HOP_FILE))
-            end
-        end)
-        return (ok and type(data) == "table") and data or {}
-    end
-
-    local function saveHop(data)
-        pcall(function()
-            if writefile then writefile(HOP_FILE, HttpService:JSONEncode(data)) end
-        end)
-    end
-
-    -- เซิร์ฟเวอร์สาธารณะที่ยังไม่เต็ม เรียงจากคนมากไปน้อย
-    local function findServers()
-        local data = getJson(string.format(
-            "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true",
-            game.PlaceId))
-        if not data or type(data.data) ~= "table" then return nil end
-        local list = {}
-        for _, s in ipairs(data.data) do
-            if s.id ~= game.JobId and type(s.playing) == "number" and type(s.maxPlayers) == "number"
-                and s.playing < s.maxPlayers then
-                list[#list + 1] = s
-            end
-        end
-        table.sort(list, function(a, b) return a.playing > b.playing end)
-        return list
-    end
-
-    local hopping, hopStartedAt = false, 0
-    local triedIds = {}
-    trackConn(TeleportService.TeleportInitFailed:Connect(function(player, result, msg)
-        if player == LocalPlayer and hopping then
-            hopping = false
-            hopStatus = "ย้ายเซิร์ฟไม่สำเร็จ · ลองเซิร์ฟถัดไป"
-            warn("[Anti AFK] Server Hop ล้มเหลว: " .. tostring(result) .. " " .. tostring(msg))
-        end
-    end))
-
-    task.spawn(function()
-        while gui.Parent do
-            if settings.serverHop then
-                if hopping and os.clock() - hopStartedAt > 25 then
-                    hopping = false -- teleport ค้าง ลองเซิร์ฟถัดไป
-                end
-                local ok, err = pcall(function()
-                    if hopping then return end
-                    local count = #Players:GetPlayers()
-                    local t = os.date("*t")
-                    if t.min ~= HOP_CHECK_MINUTE then
-                        hopStatus = string.format("ผู้เล่น %d คน · เช็กตอนนาที %02d", count, HOP_CHECK_MINUTE)
-                        return
-                    end
-                    if count >= HOP_MIN_PLAYERS then
-                        hopStatus = string.format("ผู้เล่น %d คน · พอสำหรับ Lottery", count)
-                        return
-                    end
-
-                    local key = string.format("%d-%d-%d", t.year, t.yday, t.hour)
-                    local hop = loadHop()
-                    if hop.key ~= key then hop = { key = key, count = 0 } end
-                    if hop.count >= HOP_MAX_PER_HOUR then
-                        hopStatus = string.format("ผู้เล่น %d คน · ย้ายครบ %d ครั้งแล้วรอบนี้", count, HOP_MAX_PER_HOUR)
-                        return
-                    end
-
-                    hopStatus = string.format("ผู้เล่น %d คน · กำลังหาเซิร์ฟ...", count)
-                    refresh()
-                    local servers = findServers()
-                    if not servers then
-                        hopStatus = "ดึงรายชื่อเซิร์ฟเวอร์ไม่ได้"
-                        return
-                    end
-                    local target
-                    for _, s in ipairs(servers) do
-                        if not triedIds[s.id] then target = s break end
-                    end
-                    -- ต้องมีคนมากกว่าเซิร์ฟนี้ และพอสำหรับ Lottery หลังเราเข้าไป
-                    if not target or target.playing + 1 < HOP_MIN_PLAYERS or target.playing < count then
-                        hopStatus = string.format("ผู้เล่น %d คน · ไม่มีเซิร์ฟที่คนพอ", count)
-                        return
-                    end
-
-                    hop.count += 1
-                    saveHop(hop)
-                    triedIds[target.id] = true
-                    hopping, hopStartedAt = true, os.clock()
-                    hopStatus = string.format("กำลังย้ายไปเซิร์ฟ %d/%d คน...", target.playing, target.maxPlayers)
-                    refresh()
-                    notify(string.format("ผู้เล่นไม่ถึง %d คน ย้ายไปเซิร์ฟ %d คน", HOP_MIN_PLAYERS, target.playing))
-                    print(string.format("[Anti AFK] Server Hop: %d คน -> %s (%d/%d)",
-                        count, target.id, target.playing, target.maxPlayers))
-                    TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
-                end)
-                if not ok then
-                    hopping = false
-                    hopStatus = "error: " .. tostring(err):sub(1, 60)
-                end
-            else
-                hopStatus = "ปิดอยู่"
-            end
-            refresh()
-            task.wait(3)
         end
     end)
 end
