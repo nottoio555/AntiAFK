@@ -37,7 +37,7 @@ local function notify(text)
     end)
 end
 
-local SCRIPT_VERSION = "v3.11"
+local SCRIPT_VERSION = "v3.12"
 
 -- รันซ้ำในเกม: ปิดเซสชันเก่าก่อน แล้วเริ่มใหม่ (ไม่ต้อง rejoin)
 -- ทุกลูปของสคริปต์ทำงานตราบที่กล่องสถานะยังอยู่ ลบกล่องเก่าทิ้ง = ลูปเก่าหยุดเอง
@@ -130,6 +130,7 @@ local rebirthStatus = "กำลังอ่านค่า..."
 local webhookStatus = "กำลังเริ่ม"
 local fuseStatus = "ปิดอยู่"
 local afkBuyStatus = "กำลังเริ่ม"
+local viewerStatus = "กด เปิด เพื่อดูการ์ด"
 
 -- ค่าเปิด/ปิดของปุ่ม Toggle (จำไว้ในไฟล์ จะได้ใช้ค่าเดิมหลัง rejoin)
 local SETTINGS_FILE = "AntiAFK_Settings.json"
@@ -392,7 +393,7 @@ local function addRow(key, icon, title, order, toggleKey, onToggle)
         BackgroundTransparency = 1, Position = UDim2.fromOffset(46, 22), Size = UDim2.new(1, textWidth, 0, 14),
         TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
     }, card)
-    rows[key] = { bar = bar, value = value }
+    rows[key] = { bar = bar, value = value, card = card }
 end
 
 addRow("afk", "🛡️", "Anti AFK", 1)
@@ -408,6 +409,7 @@ end)
 addRow("afkbuy", "💤", "AFK Buy · ซื้อ " .. AFK_BUY_LAST .. " แพ็คท้าย", 8, "afkBuy", function(on)
     afkBuyStatus = on and "เปิดอยู่" or "ปิดอยู่"
 end)
+addRow("viewer", "🗂️", "Card Viewer · เรียง Income / ใบที่วางอยู่", 9)
 
 -- ย่อ/ขยาย
 local collapsed = false
@@ -470,6 +472,7 @@ local function refresh()
     setRow("webhook", webhookStatus)
     setRow("fuse", fuseStatus)
     setRow("afkbuy", afkBuyStatus)
+    setRow("viewer", viewerStatus)
 end
 refresh()
 
@@ -1829,6 +1832,453 @@ do
             task.wait(2)
         end
     end)
+end
+
+-- ===== Card Viewer: เรียงการ์ดตาม Income จริง และดูใบที่วางใช้งานอยู่ =====
+-- อ่านข้อมูลจากช่องการ์ดใน InventoryGui ของเกม และอ่าน Income จาก tooltip (CardTooltip)
+do
+    local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+    local VIM = game:GetService("VirtualInputManager")
+
+    local function clean(txt)
+        return (txt:gsub("<[^>]->", ""):gsub("^%s+", ""):gsub("%s+$", ""))
+    end
+
+    local function lettersOf(s)
+        return (s:upper():gsub("%b()", ""):gsub("[^A-Z]", ""))
+    end
+
+    local SUFFIX = { K = 1e3, M = 1e6, B = 1e9, T = 1e12, QA = 1e15, QI = 1e18 }
+    local function parseNumber(s)
+        s = s:gsub("[%$%+,%s]", ""):gsub("/[sS]$", "")
+        local num, suf = s:match("^(%d+%.?%d*)(%a*)$")
+        if not num then return nil end
+        local mult = (suf == "") and 1 or SUFFIX[suf:upper()]
+        return mult and tonumber(num) * mult
+    end
+
+    local function fmtMoney(n)
+        if not n then return "?" end
+        local units = { { 1e15, "Qa" }, { 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" } }
+        for _, u in ipairs(units) do
+            if n >= u[1] then return string.format("$%.2f%s", n / u[1], u[2]) end
+        end
+        return string.format("$%d", math.floor(n))
+    end
+
+    local RARITY_COLORS = {
+        COMMON = Color3.fromRGB(160, 165, 175), RARE = Color3.fromRGB(70, 150, 255),
+        EPIC = Color3.fromRGB(160, 90, 230), LEGENDARY = Color3.fromRGB(255, 190, 60),
+        MYTHIC = Color3.fromRGB(255, 80, 80), SECRET = Color3.fromRGB(230, 230, 230),
+        SUPA = Color3.fromRGB(255, 90, 170), SPACIAL = Color3.fromRGB(175, 100, 255),
+        CELESTIAL = Color3.fromRGB(60, 220, 150),
+    }
+    local BADGES = { "PRISMATIC", "PRISM", "SHINY", "HOLO" }
+
+    -- ช่องการ์ดใน Inventory: ScrollingFrame ที่มีลูกมากที่สุดใน InventoryGui
+    local function inventoryList()
+        local inv = PlayerGui:FindFirstChild("InventoryGui")
+        if not inv then return nil end
+        local best, most = nil, 0
+        for _, d in ipairs(inv:GetDescendants()) do
+            if d:IsA("ScrollingFrame") then
+                local n = 0
+                for _, c in ipairs(d:GetChildren()) do
+                    if c:IsA("GuiObject") then n += 1 end
+                end
+                if n > most then best, most = d, n end
+            end
+        end
+        return best, inv
+    end
+
+    local function visibleWithin(obj, root)
+        local cur = obj
+        while cur and cur ~= root do
+            if cur:IsA("GuiObject") and not cur.Visible then return false end
+            cur = cur.Parent
+        end
+        return true
+    end
+
+    -- อ่านข้อมูล 1 ช่อง: ชื่อ, Rarity, Level, ป้ายพิเศษ, วางอยู่หรือไม่, รูป
+    local function readTile(tile)
+        local info = { tile = tile, level = 1, equipped = false }
+        local labels = {}
+        for _, d in ipairs(tile:GetDescendants()) do
+            if d:IsA("TextLabel") or d:IsA("TextButton") then
+                local tx = clean(d.Text)
+                if tx ~= "" then labels[#labels + 1] = { inst = d, text = tx, up = tx:upper() } end
+            end
+            if d.Name == "EquippedOverlay" and d:IsA("GuiObject") and visibleWithin(d, tile) then
+                info.equipped = true
+            end
+        end
+
+        local nameLabel, nameH = nil, -1
+        for _, l in ipairs(labels) do
+            local lv = l.up:match("^LV%.?%s*(%d+)$")
+            if lv then
+                info.level = tonumber(lv)
+            elseif l.up:find("EQUIPPED", 1, true) then
+                if visibleWithin(l.inst, tile) then info.equipped = true end
+            elseif RARITY_COLORS[lettersOf(l.text)] and not l.text:find("%(") then
+                info.rarity = lettersOf(l.text)
+            else
+                local isBadge = false
+                for _, b in ipairs(BADGES) do
+                    if l.up:find(b, 1, true) and not l.up:find("%(") then isBadge = true end
+                end
+                if isBadge then
+                    info.badge = l.text
+                elseif l.up:match("%a") and not l.up:find("%$") then
+                    local h = l.inst.AbsoluteSize.Y + l.inst.TextSize / 100
+                    if h > nameH then nameLabel, nameH = l, h end
+                end
+            end
+        end
+        if not nameLabel then return nil end
+        info.name = nameLabel.text
+
+        local img, area = nil, 0
+        for _, d in ipairs(tile:GetDescendants()) do
+            if (d:IsA("ImageLabel") or d:IsA("ImageButton")) and d.Image ~= "" then
+                local a = d.AbsoluteSize.X * d.AbsoluteSize.Y
+                if a > area then img, area = d, a end
+            end
+        end
+        if img then
+            info.image = {
+                Image = img.Image, ImageRectOffset = img.ImageRectOffset,
+                ImageRectSize = img.ImageRectSize, ScaleType = img.ScaleType,
+            }
+        end
+
+        for k, v in pairs(tile:GetAttributes()) do
+            if k:lower():find("income") and type(v) == "number" then info.income = v end
+        end
+
+        info.key = table.concat({ info.name, info.rarity or "", info.level, info.badge or "",
+            info.image and info.image.Image or "" }, "|")
+        return info
+    end
+
+    -- อ่าน tooltip ที่เกมแสดงตอนชี้เมาส์บนการ์ด
+    local function readTooltip(inv)
+        local tip = inv:FindFirstChild("CardTooltip", true)
+        if not tip then return nil end
+        local title, income, theme
+        for _, d in ipairs(tip:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                local tx = clean(d.Text)
+                local up = tx:upper()
+                local v = up:match("^INCOME[^:]*:%s*(.+)$")
+                if v then income = parseNumber(v) end
+                local th = tx:match("^[Tt][Hh][Ee][Mm][Ee]%s*:%s*(.+)$")
+                if th then theme = th end
+                if not title and tx ~= "" and not tx:find(":") then title = tx end
+            end
+        end
+        return title, income, theme
+    end
+
+    local function fireSignal(inst, signalName)
+        if not getconnections then return false end
+        local ok, sig = pcall(function() return inst[signalName] end)
+        if not ok or not sig then return false end
+        local ok2, conns = pcall(getconnections, sig)
+        if not ok2 or not conns or #conns == 0 then return false end
+        for _, c in ipairs(conns) do pcall(function() c:Fire(0, 0) end) end
+        return true
+    end
+
+    -- ชี้เมาส์ (จำลอง) บนการ์ดเพื่อให้เกมแสดง tooltip แล้วอ่าน Income
+    local function hoverIncome(info, inv)
+        local targets = { info.tile }
+        for _, d in ipairs(info.tile:GetDescendants()) do
+            if d:IsA("GuiButton") then targets[#targets + 1] = d end
+        end
+        local fired
+        for _, t in ipairs(targets) do
+            if fireSignal(t, "MouseEnter") then fired = t break end
+        end
+        if not fired then
+            -- ไม่มี getconnections: ขยับเมาส์ไปที่การ์ดจริง (ต้องเปิด Inventory อยู่)
+            local sf = info.tile:FindFirstAncestorWhichIsA("ScrollingFrame")
+            if sf then
+                local y = info.tile.AbsolutePosition.Y - sf.AbsolutePosition.Y + sf.CanvasPosition.Y
+                sf.CanvasPosition = Vector2.new(sf.CanvasPosition.X, math.max(0, y - 10))
+                task.wait(0.05)
+            end
+            local p, s = info.tile.AbsolutePosition, info.tile.AbsoluteSize
+            markSynthetic()
+            pcall(function() VIM:SendMouseMoveEvent(p.X + s.X / 2, p.Y + s.Y / 2 + 36, game) end)
+        end
+        local income, theme
+        for _ = 1, 6 do
+            task.wait()
+            local title, inc, th = readTooltip(inv)
+            if title and lettersOf(title) == lettersOf(info.name) and inc then
+                income, theme = inc, th
+                break
+            end
+        end
+        if fired then fireSignal(fired, "MouseLeave") end
+        return income, theme
+    end
+
+    -- ---------- หน้าต่าง Card Viewer ----------
+    local window = make("Frame", {
+        Name = "CardViewer", Size = UDim2.fromOffset(780, 520),
+        Position = UDim2.new(0.5, -390, 0.5, -260), BackgroundColor3 = THEME.bg,
+        BorderSizePixel = 0, Visible = false, Active = true,
+    }, gui)
+    corner(window, 14)
+    local wStroke = make("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5 }, window)
+    make("UIGradient", { Color = ColorSequence.new(THEME.accent, THEME.accent2), Rotation = 45 }, wStroke)
+
+    local top = make("Frame", { Size = UDim2.new(1, 0, 0, 92), BackgroundTransparency = 1, Active = true }, window)
+    make("TextLabel", {
+        Text = "CARD VIEWER", Font = Enum.Font.GothamBlack, TextSize = 22, TextColor3 = Color3.fromRGB(255, 200, 70),
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(20, 12), Size = UDim2.fromOffset(300, 26),
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, top)
+    local summary = make("TextLabel", {
+        Text = "", Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = THEME.sub,
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(20, 40), Size = UDim2.new(1, -140, 0, 16),
+        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+    }, top)
+
+    local function topButton(text, x, w)
+        local b = make("TextButton", {
+            Text = text, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = THEME.text,
+            BackgroundColor3 = THEME.card, BorderSizePixel = 0, AutoButtonColor = true,
+            Position = UDim2.fromOffset(x, 62), Size = UDim2.fromOffset(w, 26),
+        }, top)
+        corner(b, 8)
+        return b
+    end
+    local tabIncome = topButton("💰 Income มาก → น้อย", 20, 170)
+    local tabEquipped = topButton("✅ ใบที่วางอยู่", 198, 130)
+    local refreshBtn = topButton("🔄 อ่านใหม่", 336, 100)
+
+    local closeBtn = make("TextButton", {
+        Text = "×", Font = Enum.Font.GothamBold, TextSize = 22, TextColor3 = THEME.text,
+        BackgroundColor3 = THEME.card, BorderSizePixel = 0, Size = UDim2.fromOffset(36, 36),
+        Position = UDim2.new(1, -52, 0, 14),
+    }, top)
+    corner(closeBtn, 18)
+
+    local grid = make("ScrollingFrame", {
+        Position = UDim2.fromOffset(14, 98), Size = UDim2.new(1, -28, 1, -112),
+        BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 6,
+        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollBarImageColor3 = THEME.accent,
+    }, window)
+    make("UIGridLayout", {
+        CellSize = UDim2.fromOffset(116, 196), CellPadding = UDim2.fromOffset(9, 9),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+    }, grid)
+    make("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingLeft = UDim.new(0, 4) }, grid)
+
+    -- ลากหน้าต่าง
+    do
+        local dragging, dragStart, startPos
+        top.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging, dragStart, startPos = true, input.Position, window.Position
+                input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then dragging = false end
+                end)
+            end
+        end)
+        trackConn(UserInputService.InputChanged:Connect(function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+                or input.UserInputType == Enum.UserInputType.Touch) then
+                local d = input.Position - dragStart
+                window.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
+                    startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            end
+        end))
+    end
+
+    local function cardTile(info, rank)
+        local color = RARITY_COLORS[info.rarity or ""] or THEME.accent
+        local f = make("Frame", { BackgroundColor3 = THEME.card, BorderSizePixel = 0, LayoutOrder = rank }, grid)
+        corner(f, 10)
+        make("UIStroke", { Color = info.equipped and THEME.ok or color, Thickness = info.equipped and 2 or 1.2 }, f)
+
+        local pic = make("ImageLabel", {
+            Position = UDim2.fromOffset(6, 6), Size = UDim2.new(1, -12, 0, 108),
+            BackgroundColor3 = Color3.fromRGB(12, 12, 18), BorderSizePixel = 0,
+            ScaleType = Enum.ScaleType.Crop,
+        }, f)
+        corner(pic, 8)
+        if info.image then
+            for k, v in pairs(info.image) do pcall(function() pic[k] = v end) end
+            if pic.ScaleType == Enum.ScaleType.Stretch then pic.ScaleType = Enum.ScaleType.Crop end
+        end
+
+        local rankTag = make("TextLabel", {
+            Text = "#" .. rank, Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = THEME.text,
+            BackgroundColor3 = Color3.fromRGB(0, 0, 0), BackgroundTransparency = 0.35,
+            Position = UDim2.fromOffset(10, 10), Size = UDim2.fromOffset(34, 18),
+        }, f)
+        corner(rankTag, 6)
+        if info.level and info.level > 1 then
+            local lv = make("TextLabel", {
+                Text = "Lv." .. info.level, Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = THEME.text,
+                BackgroundColor3 = Color3.fromRGB(0, 0, 0), BackgroundTransparency = 0.35,
+                Position = UDim2.new(1, -44, 0, 10), Size = UDim2.fromOffset(34, 18),
+            }, f)
+            corner(lv, 6)
+        end
+        if info.equipped then
+            make("TextLabel", {
+                Text = "✓ วางอยู่", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = Color3.new(1, 1, 1),
+                BackgroundColor3 = Color3.fromRGB(30, 160, 80), BorderSizePixel = 0,
+                Position = UDim2.new(0, 6, 0, 96), Size = UDim2.new(1, -12, 0, 18),
+            }, f)
+        elseif info.badge then
+            make("TextLabel", {
+                Text = "✨ " .. info.badge, Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = Color3.new(1, 1, 1),
+                BackgroundColor3 = Color3.fromRGB(140, 60, 220), BorderSizePixel = 0,
+                Position = UDim2.new(0, 6, 0, 96), Size = UDim2.new(1, -12, 0, 18),
+            }, f)
+        end
+
+        make("TextLabel", {
+            Text = info.name, Font = Enum.Font.GothamBlack, TextSize = 13, TextColor3 = THEME.text,
+            BackgroundTransparency = 1, Position = UDim2.fromOffset(6, 118), Size = UDim2.new(1, -12, 0, 18),
+            TextTruncate = Enum.TextTruncate.AtEnd,
+        }, f)
+        make("TextLabel", {
+            Text = (info.rarity or "-") .. (info.theme and (" · " .. info.theme) or ""),
+            Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = color,
+            BackgroundTransparency = 1, Position = UDim2.fromOffset(6, 137), Size = UDim2.new(1, -12, 0, 14),
+            TextTruncate = Enum.TextTruncate.AtEnd,
+        }, f)
+        make("TextLabel", {
+            Text = info.income and ("+" .. fmtMoney(info.income) .. "/s") or "income ?",
+            Font = Enum.Font.GothamBlack, TextSize = 14,
+            TextColor3 = info.income and THEME.ok or THEME.sub,
+            BackgroundTransparency = 1, Position = UDim2.fromOffset(6, 156), Size = UDim2.new(1, -12, 0, 18),
+        }, f)
+        make("TextLabel", {
+            Text = info.income and string.format("%s/s", (tostring(math.floor(info.income)):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", ""))) or "",
+            Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = THEME.sub,
+            BackgroundTransparency = 1, Position = UDim2.fromOffset(6, 175), Size = UDim2.new(1, -12, 0, 14),
+        }, f)
+    end
+
+    -- ---------- ข้อมูลและการแสดงผล ----------
+    local cards = {}
+    local incomeCache = {}   -- key การ์ด -> { income, theme }
+    local mode = "income"
+    local scanning = false
+
+    local function render()
+        for _, c in ipairs(grid:GetChildren()) do
+            if c:IsA("GuiObject") then c:Destroy() end
+        end
+        local list = {}
+        for _, c in ipairs(cards) do
+            if mode == "income" or c.equipped then list[#list + 1] = c end
+        end
+        table.sort(list, function(a, b)
+            if (a.income ~= nil) ~= (b.income ~= nil) then return a.income ~= nil end
+            if a.income and b.income and a.income ~= b.income then return a.income > b.income end
+            return a.name < b.name
+        end)
+        local total, known = 0, 0
+        for i, c in ipairs(list) do
+            cardTile(c, i)
+            if c.income then total += c.income known += 1 end
+        end
+        tabIncome.BackgroundColor3 = mode == "income" and THEME.accent or THEME.card
+        tabEquipped.BackgroundColor3 = mode == "equipped" and THEME.accent or THEME.card
+        if mode == "income" then
+            summary.Text = string.format("การ์ดทั้งหมด %d ใบ · อ่าน Income ได้ %d ใบ · เรียงจาก Income มากไปน้อย", #list, known)
+        else
+            summary.Text = string.format("วางใช้งานอยู่ %d ใบ · รวม +%s/s", #list, fmtMoney(total))
+        end
+    end
+
+    local function scan()
+        if scanning then return end
+        scanning = true
+        local ok, err = pcall(function()
+            local list, inv = inventoryList()
+            if not list then
+                viewerStatus = "เปิด Inventory ในเกม 1 ครั้งก่อน"
+                summary.Text = "ไม่พบ InventoryGui · เปิดกระเป๋าในเกม 1 ครั้งแล้วกด อ่านใหม่"
+                return
+            end
+            local found = {}
+            for _, tile in ipairs(list:GetChildren()) do
+                if tile:IsA("GuiObject") then
+                    local info = readTile(tile)
+                    if info then found[#found + 1] = info end
+                end
+            end
+            if #found == 0 then
+                viewerStatus = "ไม่พบการ์ดใน Inventory"
+                summary.Text = "ยังไม่มีการ์ดในรายการ · เปิดกระเป๋าในเกม 1 ครั้งแล้วกด อ่านใหม่"
+                return
+            end
+            for i, info in ipairs(found) do
+                local cached = incomeCache[info.key]
+                if info.income then
+                    -- มีใน attribute แล้ว
+                elseif cached then
+                    info.income, info.theme = cached.income, cached.theme
+                else
+                    summary.Text = string.format("กำลังอ่าน Income %d/%d ...", i, #found)
+                    local inc, th = hoverIncome(info, inv)
+                    info.income, info.theme = inc, th
+                    if inc then incomeCache[info.key] = { income = inc, theme = th } end
+                end
+            end
+            cards = found
+            local eq = 0
+            for _, c in ipairs(cards) do if c.equipped then eq += 1 end end
+            viewerStatus = string.format("%d ใบ · วางอยู่ %d ใบ", #cards, eq)
+            render()
+        end)
+        if not ok then
+            viewerStatus = "error: " .. tostring(err):sub(1, 60)
+            warn("[Anti AFK] Card Viewer: " .. tostring(err))
+        end
+        scanning = false
+        refresh()
+    end
+
+    tabIncome.MouseButton1Click:Connect(function() mode = "income" render() end)
+    tabEquipped.MouseButton1Click:Connect(function() mode = "equipped" render() end)
+    refreshBtn.MouseButton1Click:Connect(function() task.spawn(scan) end)
+    closeBtn.MouseButton1Click:Connect(function() window.Visible = false end)
+
+    -- ปุ่ม เปิด/ปิด ในกล่องสถานะ
+    local row = rows.viewer
+    if row and row.card then
+        local openBtn = make("TextButton", {
+            Text = "เปิด", Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = Color3.new(1, 1, 1),
+            BackgroundColor3 = THEME.accent, BorderSizePixel = 0, AutoButtonColor = true,
+            Size = UDim2.fromOffset(44, 22), Position = UDim2.new(1, -52, 0.5, -11),
+        }, row.card)
+        corner(openBtn, 8)
+        openBtn.MouseButton1Click:Connect(function()
+            window.Visible = not window.Visible
+            openBtn.Text = window.Visible and "ปิด" or "เปิด"
+            if window.Visible then task.spawn(scan) end
+        end)
+        closeBtn.MouseButton1Click:Connect(function() openBtn.Text = "เปิด" end)
+        for _, l in ipairs(row.card:GetChildren()) do
+            if l:IsA("TextLabel") and l.Position.X.Offset == 46 then
+                l.Size = UDim2.new(1, -100, 0, 14)
+            end
+        end
+    end
 end
 
 notify("เปิดใช้งานแล้ว")
